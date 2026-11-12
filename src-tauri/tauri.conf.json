@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Download Cepat",
+  "version": "1.0.0",
+  "identifier": "com.moesstudio.downloadcepat",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Download Cepat",
+        "width": 1024,
+        "height": 680,
+        "minWidth": 800,
+        "minHeight": 550,
+        "resizable": true,
+        "fullscreen": false,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Ujang Mustamar",
+    "copyright": "Copyright © 2026 Ujang Mustamar. All rights reserved.",
+    "license": "MIT",
+    "homepage": "https://github.com/moesstudio/download-cepat",
+    "category": "Utility",
+    "shortDescription": "High-Speed Multi-Connection Download Manager",
+    "longDescription": "Download Cepat is a native multi-connection desktop download manager and browser media accelerator built by Ujang Mustamar.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

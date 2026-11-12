@@ -1,0 +1,36 @@
+# Binaries and executables
+*.exe
+*.bin
+
+# Rust target
+target/
+Cargo.lock
+
+# Node dependencies
+node_modules/
+dist/
+dist-isolation/
+.vite/
+
+# Tauri build artifacts
+src-tauri/target/
+installer/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SQLite local database
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Downloads temp folder
+downloads_temp/
+downloads_test/
+
+# Extension packages
+*.crx
+*.pem
+

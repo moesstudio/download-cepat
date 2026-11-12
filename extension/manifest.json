@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Download Cepat Integration Module",
+  "version": "1.2.0",
+  "author": "Ujang Mustamar",
+  "homepage_url": "https://github.com/moesstudio/download-cepat",
+  "description": "Official browser integration for Download Cepat by Ujang Mustamar: auto-capture downloads, streaming media detector, batch link grabber, and session cookies.",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "storage",
+    "cookies",
+    "nativeMessaging",
+    "webRequest",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Download Cepat",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  }
+}
