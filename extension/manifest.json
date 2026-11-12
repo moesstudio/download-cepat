@@ -4,7 +4,7 @@
   "version": "1.2.0",
   "author": "Ujang Mustamar",
   "homepage_url": "https://github.com/moesstudio/download-cepat",
-  "description": "Official browser integration for Download Cepat by Ujang Mustamar: auto-capture downloads, streaming media detector, batch link grabber, and session cookies.",
+  "description": "Integrate browsers with Download Cepat by Ujang Mustamar: capture downloads, detect video streams, and grab batch links.",
   "permissions": [
     "downloads",
     "contextMenus",
