@@ -16,7 +16,9 @@ const DC_CONTENT_I18N = {
     chooseQuality: 'Pilih Kualitas Video',
     audioOnly: '🎵 Audio Saja (MP3 & M4A)',
     bgStarted: 'Unduhan Dimulai di Latar Belakang!',
-    startFailed: 'Gagal memulai unduhan'
+    startFailed: 'Gagal memulai unduhan',
+    dismissTooltip: 'Sembunyikan tombol untuk video ini',
+    closeMenu: 'Tutup menu'
   },
   en: {
     variableSize: 'Variable size',
@@ -28,7 +30,9 @@ const DC_CONTENT_I18N = {
     chooseQuality: 'Select Video Quality',
     audioOnly: '🎵 Audio Only (MP3 & M4A)',
     bgStarted: 'Download Started in Background!',
-    startFailed: 'Failed to start download'
+    startFailed: 'Failed to start download',
+    dismissTooltip: 'Dismiss button for this video',
+    closeMenu: 'Close menu'
   },
   ms: {
     variableSize: 'Saiz berubah-ubah',
@@ -40,7 +44,9 @@ const DC_CONTENT_I18N = {
     chooseQuality: 'Pilih Kualiti Video',
     audioOnly: '🎵 Audio Sahaja (MP3 & M4A)',
     bgStarted: 'Muat Turun Dimulakan di Latar Belakang!',
-    startFailed: 'Gagal memulakan muat turun'
+    startFailed: 'Gagal memulakan muat turun',
+    dismissTooltip: 'Sembunyikan butang untuk video ini',
+    closeMenu: 'Tutup menu'
   },
   ja: {
     variableSize: 'サイズ可変',
@@ -52,7 +58,9 @@ const DC_CONTENT_I18N = {
     chooseQuality: '画質を選択',
     audioOnly: '🎵 音声のみ (MP3 & M4A)',
     bgStarted: 'バックグラウンドでダウンロード開始！',
-    startFailed: 'ダウンロードを開始できませんでした'
+    startFailed: 'ダウンロードを開始できませんでした',
+    dismissTooltip: 'この動画のボタンを非表示',
+    closeMenu: 'メニューを閉じる'
   }
 };
 
@@ -65,6 +73,32 @@ function updateFloatingButtonLabels() {
   document.querySelectorAll('.download-cepat-btn-label').forEach((el) => {
     el.textContent = dcText('downloadVideo');
   });
+  document.querySelectorAll('.download-cepat-close-btn').forEach((el) => {
+    el.setAttribute('title', dcText('dismissTooltip'));
+    el.setAttribute('aria-label', dcText('dismissTooltip'));
+  });
+  document.querySelectorAll('.dc-dropdown-close-btn').forEach((el) => {
+    el.setAttribute('title', dcText('closeMenu'));
+    el.setAttribute('aria-label', dcText('closeMenu'));
+  });
+}
+
+function closeDropdown(dropdown) {
+  if (!dropdown) return;
+  dropdown.style.display = 'none';
+  const pill = dropdown.parentElement ? dropdown.parentElement.querySelector('.download-cepat-pill-wrapper') : null;
+  if (pill) {
+    pill.style.opacity = '0.9';
+    pill.style.transform = 'scale(1)';
+  }
+}
+
+function clearVideoDismissedState() {
+  document.querySelectorAll('video').forEach((v) => {
+    delete v.dataset.downloadCepatHooked;
+    delete v.dataset.downloadCepatDismissed;
+  });
+  document.querySelectorAll('.download-cepat-video-container').forEach((c) => c.remove());
 }
 
 if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -136,11 +170,13 @@ function initVideoSniffer() {
   if (currentUrl !== cachedUrl) {
     cachedUrl = currentUrl;
     cachedData = null;
+    clearVideoDismissedState();
   }
 
   const videos = document.querySelectorAll('video');
 
   videos.forEach((video) => {
+    if (video.dataset.downloadCepatDismissed === 'true') return;
     if (video.dataset.downloadCepatHooked) return;
     video.dataset.downloadCepatHooked = 'true';
 
@@ -169,24 +205,34 @@ function initVideoSniffer() {
       user-select: none;
     `;
 
-    // 1. Floating Main Button
+    // 1. Floating Pill Wrapper: holds Download Action Button + Dismiss/Close Button
+    const pill = document.createElement('div');
+    pill.className = 'download-cepat-pill-wrapper';
+    pill.style.cssText = `
+      display: inline-flex;
+      align-items: stretch;
+      background: linear-gradient(135deg, #1d4ed8, #2563eb);
+      color: #ffffff;
+      border-radius: 9999px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      opacity: 0.9;
+      transition: all 0.2s ease;
+      overflow: hidden;
+    `;
+
+    // 1a. Main Download Button Toggle
     const btn = document.createElement('div');
     btn.className = 'download-cepat-btn';
     btn.style.cssText = `
-      background: linear-gradient(135deg, #1d4ed8, #2563eb);
-      color: #ffffff;
-      padding: 6px 14px;
-      border-radius: 9999px;
+      padding: 6px 12px 6px 14px;
       font-size: 11px;
       font-weight: 700;
       display: flex;
       align-items: center;
       gap: 6px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
       cursor: pointer;
-      opacity: 0.9;
-      transition: all 0.2s ease;
-      border: 1px solid rgba(255, 255, 255, 0.25);
+      transition: background 0.15s ease;
     `;
 
     btn.innerHTML = `
@@ -195,21 +241,68 @@ function initVideoSniffer() {
         <polyline points="7 10 12 15 17 10"></polyline>
         <line x1="12" y1="15" x2="12" y2="3"></line>
       </svg>
-      <span>${''}</span>
       <span class="download-cepat-btn-label">${dcText('downloadVideo')}</span>
       <span style="font-size: 9px; opacity: 0.8; margin-left: 2px;">▼</span>
     `;
 
-    btn.addEventListener('mouseenter', () => {
-      btn.style.opacity = '1';
-      btn.style.transform = 'scale(1.04)';
+    // 1b. Close / Dismiss Button for this video
+    const closeBtn = document.createElement('div');
+    closeBtn.className = 'download-cepat-close-btn';
+    closeBtn.setAttribute('title', dcText('dismissTooltip'));
+    closeBtn.setAttribute('aria-label', dcText('dismissTooltip'));
+    closeBtn.style.cssText = `
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      border-left: 1px solid rgba(255, 255, 255, 0.25);
+      color: rgba(255, 255, 255, 0.85);
+      transition: background 0.15s ease, color 0.15s ease;
+    `;
+    closeBtn.innerHTML = `
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    `;
+
+    pill.appendChild(btn);
+    pill.appendChild(closeBtn);
+
+    pill.addEventListener('mouseenter', () => {
+      pill.style.opacity = '1';
+      pill.style.transform = 'scale(1.03)';
     });
 
-    btn.addEventListener('mouseleave', () => {
+    pill.addEventListener('mouseleave', () => {
       if (dropdown.style.display !== 'block') {
-        btn.style.opacity = '0.9';
-        btn.style.transform = 'scale(1)';
+        pill.style.opacity = '0.9';
+        pill.style.transform = 'scale(1)';
       }
+    });
+
+    btn.addEventListener('mouseenter', () => {
+      btn.style.background = 'rgba(255, 255, 255, 0.15)';
+    });
+    btn.addEventListener('mouseleave', () => {
+      btn.style.background = 'transparent';
+    });
+
+    closeBtn.addEventListener('mouseenter', () => {
+      closeBtn.style.background = 'rgba(239, 68, 68, 0.55)';
+      closeBtn.style.color = '#ffffff';
+    });
+    closeBtn.addEventListener('mouseleave', () => {
+      closeBtn.style.background = 'transparent';
+      closeBtn.style.color = 'rgba(255, 255, 255, 0.85)';
+    });
+
+    closeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      video.dataset.downloadCepatDismissed = 'true';
+      container.remove();
     });
 
     // 2. Floating Dropdown Menu
@@ -232,7 +325,7 @@ function initVideoSniffer() {
       scrollbar-width: thin;
     `;
 
-    container.appendChild(btn);
+    container.appendChild(pill);
     container.appendChild(dropdown);
     playerContainer.appendChild(container);
 
@@ -242,14 +335,12 @@ function initVideoSniffer() {
       e.preventDefault();
 
       if (dropdown.style.display === 'block') {
-        dropdown.style.display = 'none';
-        btn.style.opacity = '0.9';
-        btn.style.transform = 'scale(1)';
+        closeDropdown(dropdown);
         return;
       }
 
       dropdown.style.display = 'block';
-      btn.style.opacity = '1';
+      pill.style.opacity = '1';
 
       loadAvailableFormats(dropdown);
     });
@@ -257,9 +348,7 @@ function initVideoSniffer() {
     // Close dropdown on outside click
     document.addEventListener('click', (e) => {
       if (!container.contains(e.target)) {
-        dropdown.style.display = 'none';
-        btn.style.opacity = '0.9';
-        btn.style.transform = 'scale(1)';
+        closeDropdown(dropdown);
       }
     });
   });
@@ -307,12 +396,49 @@ function resolveMediaExtension(mediaUrl, mimeType) {
 
 function renderDropdownStatusMessage(dropdown, titleText, detailText, allowRetry = false) {
   dropdown.innerHTML = `
+    <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; color: #94a3b8; display: flex; justify-content: space-between; align-items: center;">
+      <span style="color: #38bdf8;">Download Cepat ⚡</span>
+      <button type="button" class="dc-dropdown-close-btn" title="${dcText('closeMenu')}" style="
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #94a3b8;
+        border-radius: 4px;
+        cursor: pointer;
+        width: 20px;
+        height: 20px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        font-size: 11px;
+        line-height: 1;
+        transition: all 0.15s ease;
+      ">✕</button>
+    </div>
     <div style="padding: 14px; color: #f87171; font-size: 11px; text-align: center; line-height: 1.5;">
       ⚠️ <strong>${titleText}</strong><br>
       <span style="color: #94a3b8; font-size: 10px;">${detailText}</span>
       ${allowRetry ? `<div style="margin-top: 8px;"><button class="dc-retry-btn" style="background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 10px; font-weight: 600; cursor: pointer;">${dcText('retryBtn')}</button></div>` : ''}
     </div>
   `;
+
+  const ddClose = dropdown.querySelector('.dc-dropdown-close-btn');
+  if (ddClose) {
+    ddClose.addEventListener('mouseenter', () => {
+      ddClose.style.background = 'rgba(239, 68, 68, 0.4)';
+      ddClose.style.color = '#ffffff';
+    });
+    ddClose.addEventListener('mouseleave', () => {
+      ddClose.style.background = 'rgba(255, 255, 255, 0.08)';
+      ddClose.style.color = '#94a3b8';
+    });
+    ddClose.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      closeDropdown(dropdown);
+    });
+  }
+
   if (allowRetry) {
     const retryBtn = dropdown.querySelector('.dc-retry-btn');
     if (retryBtn) {
@@ -334,11 +460,47 @@ async function loadAvailableFormats(dropdown) {
   }
 
   dropdown.innerHTML = `
+    <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; color: #94a3b8; display: flex; justify-content: space-between; align-items: center;">
+      <span style="color: #38bdf8;">Download Cepat ⚡</span>
+      <button type="button" class="dc-dropdown-close-btn" title="${dcText('closeMenu')}" style="
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #94a3b8;
+        border-radius: 4px;
+        cursor: pointer;
+        width: 20px;
+        height: 20px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+        font-size: 11px;
+        line-height: 1;
+        transition: all 0.15s ease;
+      ">✕</button>
+    </div>
     <div style="padding: 16px; text-align: center; color: #94a3b8; font-size: 11px; display: flex; flex-direction: column; align-items: center; gap: 8px;">
       <div style="width: 18px; height: 18px; border: 2px solid #3b82f6; border-top-color: transparent; border-radius: 50%; animation: dcSpin 0.7s linear infinite;"></div>
       <span>${dcText('checkingFormats')}</span>
     </div>
   `;
+
+  const ddLoadingClose = dropdown.querySelector('.dc-dropdown-close-btn');
+  if (ddLoadingClose) {
+    ddLoadingClose.addEventListener('mouseenter', () => {
+      ddLoadingClose.style.background = 'rgba(239, 68, 68, 0.4)';
+      ddLoadingClose.style.color = '#ffffff';
+    });
+    ddLoadingClose.addEventListener('mouseleave', () => {
+      ddLoadingClose.style.background = 'rgba(255, 255, 255, 0.08)';
+      ddLoadingClose.style.color = '#94a3b8';
+    });
+    ddLoadingClose.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      closeDropdown(dropdown);
+    });
+  }
 
   if (isInspecting) return;
   isInspecting = true;
@@ -445,9 +607,27 @@ function renderFormats(dropdown, data) {
   const title = data.title || document.title.replace(' - YouTube', '').trim();
 
   let html = `
-    <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; tracking: 0.05em; color: #94a3b8; display: flex; justify-content: space-between;">
+    <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; display: flex; justify-content: space-between; align-items: center;">
       <span>${dcText('chooseQuality')}</span>
-      <span style="color: #38bdf8;">Download Cepat ⚡</span>
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: #38bdf8;">Download Cepat ⚡</span>
+        <button type="button" class="dc-dropdown-close-btn" title="${dcText('closeMenu')}" style="
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          color: #94a3b8;
+          border-radius: 4px;
+          cursor: pointer;
+          width: 20px;
+          height: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          font-size: 11px;
+          line-height: 1;
+          transition: all 0.15s ease;
+        ">✕</button>
+      </div>
     </div>
     <div style="max-height: 320px; overflow-y: auto;">
   `;
@@ -545,6 +725,23 @@ function renderFormats(dropdown, data) {
   html += `</div>`;
   dropdown.innerHTML = html;
 
+  const ddClose = dropdown.querySelector('.dc-dropdown-close-btn');
+  if (ddClose) {
+    ddClose.addEventListener('mouseenter', () => {
+      ddClose.style.background = 'rgba(239, 68, 68, 0.4)';
+      ddClose.style.color = '#ffffff';
+    });
+    ddClose.addEventListener('mouseleave', () => {
+      ddClose.style.background = 'rgba(255, 255, 255, 0.08)';
+      ddClose.style.color = '#94a3b8';
+    });
+    ddClose.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      closeDropdown(dropdown);
+    });
+  }
+
   // Add click & hover listeners for items
   const items = dropdown.querySelectorAll('.dc-format-item');
   items.forEach((item) => {
@@ -561,7 +758,7 @@ function renderFormats(dropdown, data) {
       const selected = formats.find(f => f.formatId === fmtId);
       if (!selected) return;
 
-      dropdown.style.display = 'none';
+      closeDropdown(dropdown);
 
       // Start download in background without switching to desktop app
       try {
@@ -635,9 +832,7 @@ window.addEventListener('yt-navigate-finish', () => {
   cachedData = null;
   cachedUrl = window.location.href;
   isInspecting = false;
-  document.querySelectorAll('.download-cepat-dropdown').forEach((dd) => {
-    dd.style.display = 'none';
-  });
+  clearVideoDismissedState();
   setTimeout(initVideoSniffer, 500);
 });
 
