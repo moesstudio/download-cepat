@@ -238,6 +238,24 @@ export const installBrowserExtensionHost = async (): Promise<{ success: boolean;
   return { success: true, message: 'Konektor extension dikonfigurasi (mode browser preview).' };
 };
 
+export const OFFICIAL_CHROME_WEBSTORE_URL =
+  'https://chromewebstore.google.com/detail/lmahadjehdfibjjgcnbajbgapbkghida?utm_source=item-share-cb';
+export const OFFICIAL_CHROME_EXTENSION_ID = 'lmahadjehdfibjjgcnbajbgapbkghida';
+
+export const openExternalUrl = async (url: string): Promise<{ success: boolean; message: string }> => {
+  if (isTauri()) {
+    try {
+      const msg = await invoke<string>('open_external_url', { url });
+      return { success: true, message: msg };
+    } catch {
+      window.open(url, '_blank');
+      return { success: true, message: 'URL dibuka di browser' };
+    }
+  }
+  window.open(url, '_blank');
+  return { success: true, message: 'URL dibuka di browser' };
+};
+
 export const openExtensionFolder = async (): Promise<{ success: boolean; message: string }> => {
   if (isTauri()) {
     try {

@@ -2040,7 +2040,11 @@ fn set_autostart(enable: bool) -> Result<bool, String> {
     Ok(false)
 }
 
+pub const OFFICIAL_CHROME_EXTENSION_ID: &str = "lmahadjehdfibjjgcnbajbgapbkghida";
+pub const OFFICIAL_CHROME_WEBSTORE_URL: &str = "https://chromewebstore.google.com/detail/lmahadjehdfibjjgcnbajbgapbkghida?utm_source=item-share-cb";
+
 const KNOWN_CHROMIUM_EXTENSION_IDS: &[&str] = &[
+    OFFICIAL_CHROME_EXTENSION_ID,
     "caijlihmnclbeecoodjbmfdbnfjbgdnm",
     "gbeagmdkkhbopfcggmeffpbeblalfcpk",
 ];
@@ -2161,7 +2165,77 @@ fn build_firefox_manifest_json(host_path: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Writes valid Native Messaging host manifests for Chrome, Edge, Brave, and Firefox.
+/// Configures Chrome, Edge, and Brave External Extensions to detect and prompt
+/// users to enable Download Cepat directly from the Chrome Web Store on browser startup.
+pub fn sync_external_extensions() -> usize {
+    let Some(home) = dirs::home_dir() else { return 0 };
+    let json_content = serde_json::to_string_pretty(&serde_json::json!({
+        "external_update_url": "https://clients2.google.com/service/update2/crx"
+    }))
+    .unwrap_or_else(|_| "{\"external_update_url\": \"https://clients2.google.com/service/update2/crx\"}".to_string());
+
+    let mut configured = 0;
+
+    #[cfg(target_os = "macos")]
+    {
+        let dirs = [
+            home.join("Library/Application Support/Google/Chrome/External Extensions"),
+            home.join("Library/Application Support/Microsoft Edge/External Extensions"),
+            home.join("Library/Application Support/BraveSoftware/Brave-Browser/External Extensions"),
+            home.join("Library/Application Support/Chromium/External Extensions"),
+            home.join("Library/Application Support/Vivaldi/External Extensions"),
+        ];
+        for d in &dirs {
+            if std::fs::create_dir_all(d).is_ok() {
+                let file_path = d.join(format!("{}.json", OFFICIAL_CHROME_EXTENSION_ID));
+                if std::fs::write(&file_path, &json_content).is_ok() {
+                    configured += 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let dirs = [
+            home.join(".config/google-chrome/External Extensions"),
+            home.join(".config/chromium/External Extensions"),
+            home.join(".config/BraveSoftware/Brave-Browser/External Extensions"),
+            home.join(".config/microsoft-edge/External Extensions"),
+        ];
+        for d in &dirs {
+            if std::fs::create_dir_all(d).is_ok() {
+                let file_path = d.join(format!("{}.json", OFFICIAL_CHROME_EXTENSION_ID));
+                if std::fs::write(&file_path, &json_content).is_ok() {
+                    configured += 1;
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let ext_id = OFFICIAL_CHROME_EXTENSION_ID;
+        let update_url = "https://clients2.google.com/service/update2/crx";
+        let reg_paths = [
+            format!(r#"HKCU\Software\Google\Chrome\Extensions\{}"#, ext_id),
+            format!(r#"HKCU\Software\Microsoft\Edge\Extensions\{}"#, ext_id),
+            format!(r#"HKCU\Software\BraveSoftware\Brave-Browser\Extensions\{}"#, ext_id),
+        ];
+        for path in &reg_paths {
+            let status = std::process::Command::new("reg")
+                .args(["add", path, "/v", "update_url", "/t", "REG_SZ", "/d", update_url, "/f"])
+                .status();
+            if status.map_or(false, |s| s.success()) {
+                configured += 1;
+            }
+        }
+    }
+
+    configured
+}
+
+/// Writes valid Native Messaging host manifests for Chrome, Edge, Brave, and Firefox across macOS, Windows, and Linux.
 pub fn sync_native_messaging_hosts() -> Result<usize, String> {
     let home = dirs::home_dir().ok_or("Gagal mendeteksi direktori home")?;
     let host_path = resolve_native_host_binary_path();
@@ -2169,29 +2243,91 @@ pub fn sync_native_messaging_hosts() -> Result<usize, String> {
     let chromium_manifest = build_chromium_manifest_json(&host_path, &ext_ids);
     let firefox_manifest = build_firefox_manifest_json(&host_path);
 
-    let chromium_dirs = [
-        home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
-        home.join("Library/Application Support/Microsoft Edge/NativeMessagingHosts"),
-        home.join("Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
-    ];
-
     let mut installed_count = 0;
-    for dir in &chromium_dirs {
-        if std::fs::create_dir_all(dir).is_ok() {
-            let manifest_path = dir.join("com.downloadcepat.nativehost.json");
-            if std::fs::write(&manifest_path, &chromium_manifest).is_ok() {
+
+    #[cfg(target_os = "macos")]
+    {
+        let chromium_dirs = [
+            home.join("Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+            home.join("Library/Application Support/Microsoft Edge/NativeMessagingHosts"),
+            home.join("Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            home.join("Library/Application Support/Chromium/NativeMessagingHosts"),
+            home.join("Library/Application Support/Vivaldi/NativeMessagingHosts"),
+        ];
+
+        for dir in &chromium_dirs {
+            if std::fs::create_dir_all(dir).is_ok() {
+                let manifest_path = dir.join("com.downloadcepat.nativehost.json");
+                if std::fs::write(&manifest_path, &chromium_manifest).is_ok() {
+                    installed_count += 1;
+                }
+            }
+        }
+
+        let mozilla_dir = home.join("Library/Application Support/Mozilla/NativeMessagingHosts");
+        if std::fs::create_dir_all(&mozilla_dir).is_ok() {
+            let manifest_path = mozilla_dir.join("com.downloadcepat.nativehost.json");
+            if std::fs::write(&manifest_path, &firefox_manifest).is_ok() {
                 installed_count += 1;
             }
         }
     }
 
-    let mozilla_dir = home.join("Library/Application Support/Mozilla/NativeMessagingHosts");
-    if std::fs::create_dir_all(&mozilla_dir).is_ok() {
-        let manifest_path = mozilla_dir.join("com.downloadcepat.nativehost.json");
-        if std::fs::write(&manifest_path, &firefox_manifest).is_ok() {
-            installed_count += 1;
+    #[cfg(target_os = "linux")]
+    {
+        let chromium_dirs = [
+            home.join(".config/google-chrome/NativeMessagingHosts"),
+            home.join(".config/chromium/NativeMessagingHosts"),
+            home.join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            home.join(".config/microsoft-edge/NativeMessagingHosts"),
+        ];
+
+        for dir in &chromium_dirs {
+            if std::fs::create_dir_all(dir).is_ok() {
+                let manifest_path = dir.join("com.downloadcepat.nativehost.json");
+                if std::fs::write(&manifest_path, &chromium_manifest).is_ok() {
+                    installed_count += 1;
+                }
+            }
+        }
+
+        let mozilla_dir = home.join(".mozilla/native-messaging-hosts");
+        if std::fs::create_dir_all(&mozilla_dir).is_ok() {
+            let manifest_path = mozilla_dir.join("com.downloadcepat.nativehost.json");
+            if std::fs::write(&manifest_path, &firefox_manifest).is_ok() {
+                installed_count += 1;
+            }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"));
+        let manifest_dir = appdata.join("Download Cepat/NativeMessagingHosts");
+        if std::fs::create_dir_all(&manifest_dir).is_ok() {
+            let chrome_manifest_file = manifest_dir.join("com.downloadcepat.nativehost.json");
+            if std::fs::write(&chrome_manifest_file, &chromium_manifest).is_ok() {
+                let reg_keys = [
+                    r#"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                    r#"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                    r#"HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                ];
+                for k in &reg_keys {
+                    let status = std::process::Command::new("reg")
+                        .args(["add", k, "/ve", "/t", "REG_SZ", "/d", &chrome_manifest_file.to_string_lossy(), "/f"])
+                        .status();
+                    if status.map_or(false, |s| s.success()) {
+                        installed_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also auto-sync Chrome Web Store external extensions preferences
+    let _ = sync_external_extensions();
 
     Ok(installed_count)
 }
@@ -2360,10 +2496,21 @@ pub fn maybe_run_native_messaging_host() -> bool {
 #[tauri::command]
 fn install_browser_extension_host() -> Result<String, String> {
     let installed_count = sync_native_messaging_hosts()?;
+    let ext_count = sync_external_extensions();
     Ok(format!(
-        "Konektor native berhasil dipasang ke {} browser (Chrome, Edge, Brave, Firefox).",
-        installed_count
+        "Konektor native berhasil dipasang ke {} browser dan {} konfigurasi External Extensions aktif.",
+        installed_count, ext_count
     ))
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<String, String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        open::that(&url).map_err(|e| format!("Gagal membuka URL: {}", e))?;
+        Ok(format!("URL dibuka di browser: {}", url))
+    } else {
+        Err("URL harus berawalan http:// atau https://".to_string())
+    }
 }
 
 #[tauri::command]
@@ -2880,6 +3027,7 @@ pub fn run() {
             set_autostart,
             install_browser_extension_host,
             open_extension_folder,
+            open_external_url,
             get_build_info,
             set_tray_language
         ])
@@ -3216,13 +3364,20 @@ mod tests {
 
         let chromium_json = build_chromium_manifest_json(
             "/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app",
-            &["gbeagmdkkhbopfcggmeffpbeblalfcpk".to_string()],
+            &[
+                OFFICIAL_CHROME_EXTENSION_ID.to_string(),
+                "gbeagmdkkhbopfcggmeffpbeblalfcpk".to_string(),
+            ],
         );
         assert!(!chromium_json.contains("chrome-extension://*/"));
+        assert!(chromium_json.contains(&format!("chrome-extension://{}/", OFFICIAL_CHROME_EXTENSION_ID)));
         assert!(chromium_json.contains("chrome-extension://gbeagmdkkhbopfcggmeffpbeblalfcpk/"));
 
         let firefox_json = build_firefox_manifest_json("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app");
         assert!(firefox_json.contains("allowed_extensions"));
+
+        let ext_sync_count = sync_external_extensions();
+        assert!(ext_sync_count >= 1, "Should configure at least 1 browser external extension path");
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }

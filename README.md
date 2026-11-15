@@ -114,7 +114,12 @@ cargo run --bin download-cepat-cli --manifest-path core-engine/Cargo.toml -- "ht
 ```
 
 ### 4. Memasang Ekstensi Browser
-1. Buka Google Chrome / Edge dan navigasikan ke `chrome://extensions/`.
+
+**Cara Termudah (Resmi Chrome Web Store)**:
+👉 **[Pasang Download Cepat Integration Module di Chrome Web Store](https://chromewebstore.google.com/detail/lmahadjehdfibjjgcnbajbgapbkghida?utm_source=item-share-cb)** *(ID: `lmahadjehdfibjjgcnbajbgapbkghida`)*
+
+**Cara Manual / Pengembang (Offline)**:
+1. Buka Google Chrome / Edge / Brave dan navigasikan ke `chrome://extensions/`.
 2. Aktifkan **Developer mode** di pojok kanan atas.
 3. Klik tombol **Load unpacked** dan pilih folder `extension/`.
 
