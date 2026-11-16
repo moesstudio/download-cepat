@@ -184,7 +184,9 @@ function showInPageToast(message, isError = false) {
     <div style="flex: 1; line-height: 1.4;">${message}</div>
   `;
 
-  document.body.appendChild(toast);
+  const toastRoot = document.body || document.documentElement;
+  if (!toastRoot) return;
+  toastRoot.appendChild(toast);
 
   setTimeout(() => {
     toast.style.opacity = '0';
@@ -193,7 +195,24 @@ function showInPageToast(message, isError = false) {
   }, 4000);
 }
 
+function isSubFrameWindow() {
+  try {
+    return window.self !== window.top;
+  } catch (_) {
+    return true;
+  }
+}
+
 function initVideoSniffer() {
+  if (
+    isSubFrameWindow() &&
+    window.innerWidth > 0 &&
+    window.innerHeight > 0 &&
+    (window.innerWidth < 140 || window.innerHeight < 80)
+  ) {
+    return;
+  }
+
   const currentUrl = window.location.href;
   if (currentUrl !== cachedUrl) {
     resetInspectCacheForUrl(currentUrl);
@@ -205,6 +224,23 @@ function initVideoSniffer() {
   videos.forEach((video) => {
     if (video.dataset.downloadCepatDismissed === 'true') return;
     if (video.dataset.downloadCepatHooked) return;
+
+    const rect = typeof video.getBoundingClientRect === 'function'
+      ? video.getBoundingClientRect()
+      : null;
+    if (
+      rect &&
+      (rect.width > 0 || rect.height > 0) &&
+      (rect.width < 120 || rect.height < 68)
+    ) {
+      if (!video.dataset.dcPendingResize) {
+        video.dataset.dcPendingResize = 'true';
+        video.addEventListener('loadedmetadata', initVideoSniffer, { once: true });
+        video.addEventListener('playing', initVideoSniffer, { once: true });
+      }
+      return;
+    }
+
     video.dataset.downloadCepatHooked = 'true';
 
     // Find suitable parent (like player container)
@@ -351,7 +387,8 @@ function initVideoSniffer() {
       top: calc(100% + 8px);
       right: 0;
       width: 320px;
-      max-height: 420px;
+      max-width: calc(100vw - 24px);
+      max-height: min(420px, calc(100vh - 64px));
       overflow-y: auto;
       background: #0f172a;
       color: #f8fafc;
@@ -415,6 +452,7 @@ function sendExtensionBridgeMessage(message) {
 function resolveMediaExtension(mediaUrl, mimeType) {
   const lowerUrl = (mediaUrl || '').split('?')[0].split('#')[0].toLowerCase();
   if (lowerUrl.endsWith('.m3u8') || lowerUrl.endsWith('.mpd') || lowerUrl.endsWith('.mp4')) return 'mp4';
+  if (lowerUrl.endsWith('.ts')) return 'ts';
   if (lowerUrl.endsWith('.webm')) return 'webm';
   if (lowerUrl.endsWith('.mov')) return 'mov';
   if (lowerUrl.endsWith('.mp3')) return 'mp3';
@@ -429,6 +467,7 @@ function resolveMediaExtension(mediaUrl, mimeType) {
   if (mime === 'audio/aac') return 'aac';
   if (mime === 'audio/webm' || mime === 'video/webm') return 'webm';
   if (mime === 'video/quicktime') return 'mov';
+  if (mime === 'video/mp2t' || mime === 'application/mp2t') return 'ts';
   return mime.startsWith('audio/') ? 'm4a' : 'mp4';
 }
 
@@ -614,7 +653,8 @@ async function loadAvailableFormats(dropdown, forceFresh = false) {
   }
 
   try {
-    const result = await fetchFormatsForUrl(targetUrl, { forceFresh });
+    const isHttpTarget = targetUrl.startsWith('http://') || targetUrl.startsWith('https://');
+    const result = isHttpTarget ? await fetchFormatsForUrl(targetUrl, { forceFresh }) : null;
     if (window.location.href !== targetUrl || (!forceFresh && startGen !== inspectGeneration)) {
       return;
     }
@@ -626,7 +666,7 @@ async function loadAvailableFormats(dropdown, forceFresh = false) {
     if (data && data.status === 'ok' && data.formats && data.formats.length > 0) {
       renderFormats(dropdown, data);
     } else {
-      // Fallback: check passive webRequest sniffed streams or direct <video> src tags on any site
+      // Fallback: check passive webRequest sniffed streams or direct <video> src tags on any site/iframe
       const sniffResp = await sendExtensionBridgeMessage({ action: 'GET_TAB_STREAMS' });
       if (window.location.href !== targetUrl || !dropdown.isConnected || dropdown.style.display === 'none') {
         return;
@@ -640,7 +680,11 @@ async function loadAvailableFormats(dropdown, forceFresh = false) {
       const seenUrls = new Set();
       sniffed.forEach((s, idx) => {
         const mimeLower = (s.mimeType || '').toLowerCase();
+        const urlPathLower = (s.url || '').split('?')[0].split('#')[0].toLowerCase();
         const isManifest = s.url.includes('.m3u8') || s.url.includes('.mpd') || mimeLower.includes('mpegurl') || mimeLower.includes('dash');
+        if (urlPathLower.endsWith('.ts') && typeof s.fileSize === 'number' && s.fileSize < 5 * 1024 * 1024) {
+          return;
+        }
         if (!isManifest && typeof s.fileSize === 'number' && s.fileSize < 64 * 1024) {
           return;
         }
@@ -675,9 +719,12 @@ async function loadAvailableFormats(dropdown, forceFresh = false) {
       });
 
       if (fallbackFormats.length > 0) {
+        const fallbackTitle = (document.title && document.title.trim())
+          || (sniffResp && sniffResp.tabTitle ? sniffResp.tabTitle.trim() : '')
+          || 'Video';
         const synthetic = {
           status: 'ok',
-          title: document.title || 'Video',
+          title: fallbackTitle,
           formats: fallbackFormats,
         };
         renderFormats(dropdown, synthetic);
@@ -705,7 +752,7 @@ async function loadAvailableFormats(dropdown, forceFresh = false) {
 
 function renderFormats(dropdown, data) {
   const formats = data.formats || [];
-  const title = data.title || document.title.replace(' - YouTube', '').trim();
+  const title = data.title || document.title.replace(' - YouTube', '').trim() || 'Video';
 
   let html = `
     <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; display: flex; justify-content: space-between; align-items: center;">
@@ -866,6 +913,8 @@ function renderFormats(dropdown, data) {
         const isSniffedDirect =
           selected.formatId &&
           (selected.formatId.startsWith('stream_') || selected.formatId.startsWith('direct_'));
+        const frameHref = (window.location && window.location.href) || '';
+        const isHttpFrame = frameHref.startsWith('http://') || frameHref.startsWith('https://');
         const payload = {
           url: (isSniffedDirect && selected.downloadUrl) ? selected.downloadUrl : window.location.href,
           title: title,
@@ -874,6 +923,10 @@ function renderFormats(dropdown, data) {
           extension: selected.extension,
           isAudioOnly: selected.isAudioOnly
         };
+        if (isSniffedDirect && isSubFrameWindow() && isHttpFrame) {
+          payload.referer = frameHref;
+          payload.referrer = frameHref;
+        }
 
         let resultData = null;
         const bridgeResp = await sendExtensionBridgeMessage({
@@ -917,19 +970,22 @@ function renderFormats(dropdown, data) {
 
 // Inject keyframe animation for spinner
 if (!document.getElementById('download-cepat-style')) {
-  const style = document.createElement('style');
-  style.id = 'download-cepat-style';
-  style.textContent = `
-    @keyframes dcSpin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    @keyframes dcFadeIn {
-      from { opacity: 0; transform: translateY(-8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-  `;
-  document.head.appendChild(style);
+  const styleRoot = document.head || document.documentElement;
+  if (styleRoot) {
+    const style = document.createElement('style');
+    style.id = 'download-cepat-style';
+    style.textContent = `
+      @keyframes dcSpin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      @keyframes dcFadeIn {
+        from { opacity: 0; transform: translateY(-8px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    `;
+    styleRoot.appendChild(style);
+  }
 }
 
 // Listen to YouTube SPA video navigation
@@ -941,5 +997,16 @@ window.addEventListener('yt-navigate-finish', () => {
 
 // Periodic observer for dynamic video elements
 const observer = new MutationObserver(() => initVideoSniffer());
-observer.observe(document.body, { childList: true, subtree: true });
-initVideoSniffer();
+const observeRoot = document.body || document.documentElement;
+if (observeRoot) {
+  observer.observe(observeRoot, { childList: true, subtree: true });
+  initVideoSniffer();
+} else {
+  window.addEventListener('DOMContentLoaded', () => {
+    const readyRoot = document.body || document.documentElement;
+    if (readyRoot) {
+      observer.observe(readyRoot, { childList: true, subtree: true });
+      initVideoSniffer();
+    }
+  }, { once: true });
+}

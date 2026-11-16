@@ -27,6 +27,7 @@ const INTERCEPT_MIME_PREFIXES = [
   "application/vnd.android.package-archive",
   "application/x-bittorrent",
   "application/pdf",
+  "application/mp2t",
   "video/",
   "audio/"
 ];
@@ -136,9 +137,25 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // Passive Network Media Sniffer (MV3 compliant)
+function isNonMediaMimeForTs(contentType) {
+  const mime = (contentType || "").split(";")[0].trim().toLowerCase();
+  if (!mime) return false;
+  return (
+    mime.startsWith("text/") ||
+    mime.startsWith("image/") ||
+    mime.startsWith("font/") ||
+    mime.includes("javascript") ||
+    mime.includes("typescript") ||
+    mime === "application/json" ||
+    mime === "application/xml"
+  );
+}
+
 function normalizeSniffedMime(pathLower, contentType) {
   const mime = (contentType || "").split(";")[0].trim().toLowerCase();
+  if (mime === "application/mp2t") return "video/mp2t";
   if (mime && mime !== "application/octet-stream") return mime;
+  if (pathLower.endsWith(".ts")) return "video/mp2t";
   if (pathLower.endsWith(".mp3")) return "audio/mpeg";
   if (pathLower.endsWith(".m4a")) return "audio/mp4";
   if (pathLower.endsWith(".aac")) return "audio/aac";
@@ -153,6 +170,7 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
   chrome.webRequest.onResponseStarted.addListener(
     (details) => {
       if (!details || details.tabId < 0) return;
+      if (details.type === "script" || details.type === "stylesheet") return;
       const u = details.url || "";
       if (!u.startsWith("http://") && !u.startsWith("https://")) return;
       if (u.startsWith("http://127.0.0.1:18291")) return;
@@ -175,18 +193,43 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
         pathLower = new URL(u).pathname.toLowerCase();
       } catch (_) {}
 
+      const isTsUrl = pathLower.endsWith(".ts");
+      if (isTsUrl && isNonMediaMimeForTs(contentType)) {
+        return;
+      }
       // Skip tiny HLS .ts fragments when sniffing streams to keep list crisp
-      if (pathLower.endsWith(".ts") && contentLength !== null && contentLength < 5 * 1024 * 1024) {
+      if (isTsUrl && contentLength !== null && contentLength < 5 * 1024 * 1024) {
         return;
       }
 
+      const existingList = tabMediaStreams.get(details.tabId) || [];
+      const tabHasManifest = existingList.some((item) => {
+        const itemMime = (item.mimeType || "").toLowerCase();
+        return (
+          item.url.includes(".m3u8") ||
+          item.url.includes(".mpd") ||
+          itemMime.includes("mpegurl") ||
+          itemMime.includes("dash")
+        );
+      });
+      // Chunked HLS .ts segments without Content-Length should not flood/evict an existing HLS manifest
+      if (isTsUrl && contentLength === null && tabHasManifest) {
+        return;
+      }
+
+      const mimeOnly = contentType.split(";")[0].trim().toLowerCase();
       const isManifest =
         pathLower.endsWith(".m3u8") ||
         pathLower.endsWith(".mpd") ||
         contentType.includes("mpegurl") ||
         contentType.includes("dash+xml");
+      const isLargeDirectTs =
+        isTsUrl &&
+        contentLength !== null &&
+        contentLength >= 5 * 1024 * 1024;
       const isStreamUrl =
         isManifest ||
+        isLargeDirectTs ||
         pathLower.endsWith(".mp4") ||
         pathLower.endsWith(".webm") ||
         pathLower.endsWith(".mov") ||
@@ -199,7 +242,8 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
         pathLower.endsWith(".wav");
       const isStreamMime =
         contentType.startsWith("video/") ||
-        contentType.startsWith("audio/");
+        contentType.startsWith("audio/") ||
+        mimeOnly === "application/mp2t";
 
       if (!isStreamUrl && !isStreamMime) return;
       // Skip small UI sound effects (e.g. YouTube voice-search chimes < 64 KB)
@@ -207,13 +251,15 @@ if (chrome.webRequest && chrome.webRequest.onResponseStarted) {
         return;
       }
 
-      const list = tabMediaStreams.get(details.tabId) || [];
+      const list = existingList;
       if (!list.some((item) => item.url === u)) {
         let label = pathLower.split("/").pop() || "media";
         if (pathLower.endsWith(".m3u8") || contentType.includes("mpegurl")) {
           label = `HLS Stream (${label})`;
         } else if (pathLower.endsWith(".mpd") || contentType.includes("dash+xml")) {
           label = `DASH Stream (${label})`;
+        } else if (isTsUrl || mimeOnly === "video/mp2t" || mimeOnly === "application/mp2t") {
+          label = `TS Video (${label})`;
         }
         list.unshift({
           url: u,
@@ -258,9 +304,24 @@ function matchesDownloadExtension(targetUrl, filename) {
   );
 }
 
+function isLargeTsDownload(item) {
+  if (typeof item.fileSize !== "number" || item.fileSize < 5 * 1024 * 1024) {
+    return false;
+  }
+  const filenameLower = (item && item.filename ? item.filename : "").toLowerCase();
+  const targetUrl = (item && (item.finalUrl || item.url)) || "";
+  let urlPath = targetUrl.toLowerCase();
+  try {
+    urlPath = new URL(targetUrl).pathname.toLowerCase();
+  } catch (_) {}
+  return filenameLower.endsWith(".ts") || urlPath.endsWith(".ts");
+}
+
 function matchesDownloadMime(item) {
   const mime = (item && item.mime ? item.mime : "").toLowerCase().split(";")[0].trim();
-  if (!mime) return false;
+  if (!mime) {
+    return isLargeTsDownload(item);
+  }
   if (INTERCEPT_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) {
     return true;
   }
@@ -283,26 +344,38 @@ async function resolveEffectiveReferrer(referrer) {
   return "";
 }
 
-async function collectCookiesHeader(targetUrl, referrerUrl) {
+async function collectCookiesHeader(targetUrl, referrerUrl, extraUrls = []) {
   if (!chrome.cookies || !chrome.cookies.getAll) {
     return "";
   }
   try {
     const cookieMap = new Map();
     const urlsToCheck = [];
-    if (targetUrl && (targetUrl.startsWith("http://") || targetUrl.startsWith("https://"))) {
-      urlsToCheck.push(targetUrl);
-      try {
-        const u = new URL(targetUrl);
-        const hostParts = u.hostname.split(".");
-        if (hostParts.length > 2) {
-          const rootDomain = hostParts.slice(-2).join(".");
-          urlsToCheck.push(`${u.protocol}//${rootDomain}/`);
-        }
-      } catch (_) {}
-    }
-    if (referrerUrl && (referrerUrl.startsWith("http://") || referrerUrl.startsWith("https://"))) {
-      urlsToCheck.push(referrerUrl);
+    const seenCheckUrls = new Set();
+    const pushUrl = (raw) => {
+      if (raw && (raw.startsWith("http://") || raw.startsWith("https://")) && !seenCheckUrls.has(raw)) {
+        seenCheckUrls.add(raw);
+        urlsToCheck.push(raw);
+      }
+    };
+    const pushWithRoot = (raw) => {
+      pushUrl(raw);
+      if (raw && (raw.startsWith("http://") || raw.startsWith("https://"))) {
+        try {
+          const u = new URL(raw);
+          const hostParts = u.hostname.split(".");
+          if (hostParts.length > 2) {
+            const rootDomain = hostParts.slice(-2).join(".");
+            pushUrl(`${u.protocol}//${rootDomain}/`);
+          }
+        } catch (_) {}
+      }
+    };
+
+    pushWithRoot(targetUrl);
+    pushUrl(referrerUrl);
+    for (const extra of Array.isArray(extraUrls) ? extraUrls : []) {
+      pushUrl(extra);
     }
 
     for (const checkUrl of urlsToCheck) {
@@ -395,28 +468,40 @@ async function collectAndSendAllPageLinks(tab) {
   const d = getBgDict();
   if (!tab || !tab.id) return { ok: false, error: d.noActiveTab };
   try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        const seen = new Set();
-        const items = [];
-        const addUrl = (raw, label) => {
-          if (!raw) return;
-          try {
-            const abs = new URL(raw, document.baseURI).href;
-            if ((abs.startsWith("http://") || abs.startsWith("https://") || abs.startsWith("ftp://")) && !seen.has(abs)) {
-              seen.add(abs);
-              items.push({ url: abs, label: (label || "").trim().slice(0, 80) });
-            }
-          } catch (_) {}
-        };
-        document.querySelectorAll("a[href]").forEach((el) => addUrl(el.getAttribute("href"), el.textContent));
-        document.querySelectorAll("video[src], audio[src], source[src]").forEach((el) => addUrl(el.getAttribute("src"), "Media"));
-        return items.slice(0, 500);
-      }
-    });
+    const collectDomLinks = () => {
+      const seen = new Set();
+      const items = [];
+      const addUrl = (raw, label) => {
+        if (!raw) return;
+        try {
+          const abs = new URL(raw, document.baseURI).href;
+          if ((abs.startsWith("http://") || abs.startsWith("https://") || abs.startsWith("ftp://")) && !seen.has(abs)) {
+            seen.add(abs);
+            items.push({ url: abs, label: (label || "").trim().slice(0, 80) });
+          }
+        } catch (_) {}
+      };
+      document.querySelectorAll("a[href]").forEach((el) => addUrl(el.getAttribute("href"), el.textContent));
+      document.querySelectorAll("video[src], audio[src], source[src]").forEach((el) => addUrl(el.getAttribute("src"), "Media"));
+      return items.slice(0, 500);
+    };
 
-    const pageLinks = (results && results[0] && Array.isArray(results[0].result)) ? results[0].result : [];
+    let results = [];
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: collectDomLinks
+      });
+    } catch (_) {
+      results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: collectDomLinks
+      });
+    }
+
+    const pageLinks = Array.isArray(results)
+      ? results.flatMap((r) => (r && Array.isArray(r.result)) ? r.result : [])
+      : [];
     const sniffed = tabMediaStreams.get(tab.id) || [];
     const merged = [];
     const seen = new Set();
@@ -480,7 +565,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === "GET_TAB_STREAMS") {
     const tabId = typeof message.tabId === "number" ? message.tabId : (sender.tab && sender.tab.id);
-    sendResponse({ ok: true, streams: tabId >= 0 ? (tabMediaStreams.get(tabId) || []) : [] });
+    sendResponse({
+      ok: true,
+      streams: tabId >= 0 ? (tabMediaStreams.get(tabId) || []) : [],
+      tabTitle: (sender.tab && sender.tab.title) || ""
+    });
     return false;
   }
 
@@ -511,8 +600,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       try {
         const targetUrl = message.url || "";
-        const ref = (sender.tab && sender.tab.url) || targetUrl;
-        const cookieHeader = await collectCookiesHeader(targetUrl, ref);
+        const tabUrl = (sender.tab && sender.tab.url) || "";
+        const frameUrl = sender.url || "";
+        const ref = (tabUrl.startsWith("http://") || tabUrl.startsWith("https://"))
+          ? tabUrl
+          : ((frameUrl.startsWith("http://") || frameUrl.startsWith("https://")) ? frameUrl : targetUrl);
+        const cookieHeader = await collectCookiesHeader(targetUrl, ref, [frameUrl, tabUrl]);
         const ua = (typeof navigator !== "undefined" && navigator.userAgent) ? navigator.userAgent : "";
         const requestBody = {
           url: targetUrl,
@@ -561,12 +654,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         const payload = Object.assign({}, message.payload || {});
         const targetUrl = payload.url || "";
-        const ref = (sender.tab && sender.tab.url) || targetUrl;
-        const cookieHeader = await collectCookiesHeader(targetUrl, ref);
+        const tabUrl = (sender.tab && sender.tab.url) || "";
+        const frameUrl = sender.url || "";
+        const defaultRef = (tabUrl.startsWith("http://") || tabUrl.startsWith("https://"))
+          ? tabUrl
+          : ((frameUrl.startsWith("http://") || frameUrl.startsWith("https://")) ? frameUrl : targetUrl);
+        const effectiveRef = payload.referer || payload.referrer || defaultRef;
+        const cookieHeader = await collectCookiesHeader(targetUrl, effectiveRef, [frameUrl, tabUrl]);
         const ua = (typeof navigator !== "undefined" && navigator.userAgent) ? navigator.userAgent : "";
         payload.cookie = payload.cookie || cookieHeader;
-        payload.referer = payload.referer || ref;
-        payload.referrer = payload.referrer || ref;
+        payload.referer = effectiveRef;
+        payload.referrer = payload.referrer || effectiveRef;
         payload.userAgent = payload.userAgent || ua;
 
         try {
