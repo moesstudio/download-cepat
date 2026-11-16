@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use flate2::read::DeflateDecoder;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Mutex};
 
@@ -83,6 +83,120 @@ pub fn quickjs_download_url_for(os: &str, arch: &str) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FfmpegAssetSpec {
+    pub url: &'static str,
+    pub min_compressed_bytes: u64,
+    pub min_extracted_bytes: u64,
+}
+
+/// Static FFmpeg 6.1.1 gzip-compressed release binaries from `eugeneware/ffmpeg-static`.
+/// Supplies split-stream HD/4K/8K muxing (`vp9`/`av01`/`avc1` + `m4a`/`opus`) and audio
+/// transcoding when system FFmpeg is absent (e.g., fresh Windows or Linux installs).
+pub fn ffmpeg_download_spec(os: &str, arch: &str) -> Option<FfmpegAssetSpec> {
+    match (os, arch) {
+        ("windows", "x86_64") | ("windows", "aarch64") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("macos", "aarch64") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("macos", "x86_64") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("linux", "x86_64") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("linux", "aarch64") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-arm64.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("linux", "arm") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-arm.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        ("linux", "x86") => Some(FfmpegAssetSpec {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-ia32.gz",
+            min_compressed_bytes: 5_000_000,
+            min_extracted_bytes: 10_000_000,
+        }),
+        _ => None,
+    }
+}
+
+/// Decompresses a `.gz` single-file release asset into `dest_path`, verifying gzip CRC/size trailer.
+pub fn extract_gzip_file(gz_path: &Path, dest_path: &Path) -> Result<u64, String> {
+    if let Some(parent) = dest_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Gagal membuat folder tujuan ekstraksi ({}): {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+    }
+
+    let in_file = std::fs::File::open(gz_path)
+        .map_err(|e| format!("Gagal membuka arsip GZIP {}: {}", gz_path.display(), e))?;
+    let mut decoder = GzDecoder::new(std::io::BufReader::new(in_file));
+    let out_file = std::fs::File::create(dest_path).map_err(|e| {
+        format!(
+            "Gagal membuat berkas hasil ekstraksi {}: {}",
+            dest_path.display(),
+            e
+        )
+    })?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut written: u64 = 0;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = match decoder.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => {
+                drop(writer);
+                let _ = std::fs::remove_file(dest_path);
+                return Err(format!(
+                    "Gagal mendekompresi arsip GZIP {}: {}",
+                    gz_path.display(),
+                    e
+                ));
+            }
+        };
+        if let Err(e) = writer.write_all(&buf[..n]) {
+            drop(writer);
+            let _ = std::fs::remove_file(dest_path);
+            return Err(format!(
+                "Gagal menulis berkas {}: {}",
+                dest_path.display(),
+                e
+            ));
+        }
+        written = written.saturating_add(n as u64);
+    }
+
+    if let Err(e) = writer.flush() {
+        drop(writer);
+        let _ = std::fs::remove_file(dest_path);
+        return Err(format!("Gagal flush berkas {}: {}", dest_path.display(), e));
+    }
+
+    Ok(written)
 }
 
 /// Parses `node --version` output (e.g. `"v22.14.0\n"`) into major version integer.
@@ -886,19 +1000,115 @@ fn video_container_compatibility_score(s: &ResolvedHttpStream, target_ext: &str)
     let vlow = s.vcodec.to_ascii_lowercase();
     if target_ext.eq_ignore_ascii_case("mp4") {
         if s.ext == "mp4" && vlow.starts_with("avc") {
-            4
+            5
         } else if s.ext == "mp4" {
+            4
+        } else if s.ext == "webm" && !vlow.starts_with("vp8") {
             3
         } else if s.ext == "webm" {
-            2
-        } else {
             1
+        } else {
+            2
         }
     } else if s.ext.eq_ignore_ascii_case(target_ext) {
-        4
+        5
     } else {
         2
     }
+}
+
+fn is_playable_video_entry(f: &serde_json::Value) -> bool {
+    let ext = f["ext"].as_str().unwrap_or("").trim();
+    let protocol = f["protocol"].as_str().unwrap_or("").trim();
+    let note = f["format_note"].as_str().unwrap_or("");
+    let vcodec = f["vcodec"].as_str().unwrap_or("none").trim();
+    !ext.eq_ignore_ascii_case("mhtml")
+        && !protocol.to_ascii_lowercase().contains("mhtml")
+        && !note.to_ascii_lowercase().contains("storyboard")
+        && vcodec != "none"
+        && f["height"].as_u64().unwrap_or(0) > 0
+}
+
+fn max_playable_video_height_under_cap(
+    formats_arr: &[serde_json::Value],
+    cap: Option<u64>,
+) -> Option<u64> {
+    let all_heights: Vec<u64> = formats_arr
+        .iter()
+        .filter(|f| is_playable_video_entry(f))
+        .filter_map(|f| f["height"].as_u64().filter(|&h| h > 0))
+        .collect();
+    if all_heights.is_empty() {
+        return None;
+    }
+    match cap {
+        Some(c) => all_heights.iter().copied().filter(|&h| h <= c).max(),
+        None => all_heights.into_iter().max(),
+    }
+}
+
+/// Returns `true` when the requested video resolution/format exists in `json` only as a split
+/// video-only stream paired with separate audio (requiring FFmpeg muxing), so callers must not
+/// silently downgrade a high-resolution request (e.g. 4K/1080p) to 360p progressive if FFmpeg fails.
+pub fn requested_height_requires_split(
+    json: &serde_json::Value,
+    format_id: Option<&str>,
+) -> bool {
+    let clean_fid = format_id.map(str::trim).filter(|s| !s.is_empty());
+    if matches!(clean_fid, Some("audio_mp3") | Some("audio_m4a")) {
+        return false;
+    }
+
+    if let Some(formats_arr) = json["formats"].as_array().filter(|a| !a.is_empty()) {
+        let has_audio_only = formats_arr.iter().any(|f| {
+            let ext = f["ext"].as_str().unwrap_or("").trim();
+            let protocol = f["protocol"].as_str().unwrap_or("").trim();
+            !ext.eq_ignore_ascii_case("mhtml")
+                && !protocol.to_ascii_lowercase().contains("mhtml")
+                && f["vcodec"].as_str().unwrap_or("none").trim() == "none"
+                && f["acodec"].as_str().unwrap_or("none").trim() != "none"
+        });
+        if !has_audio_only {
+            return false;
+        }
+
+        let requested_max_h = parse_requested_height(clean_fid);
+        if let (Some(fid), None) = (clean_fid, requested_max_h) {
+            if let Some(raw_entry) = formats_arr
+                .iter()
+                .find(|f| f["format_id"].as_str() == Some(fid))
+            {
+                let vcodec = raw_entry["vcodec"].as_str().unwrap_or("none").trim();
+                let acodec = raw_entry["acodec"].as_str().unwrap_or("none").trim();
+                return vcodec != "none" && acodec == "none";
+            }
+        }
+
+        if let Some(target_h) = max_playable_video_height_under_cap(formats_arr, requested_max_h) {
+            let has_progressive_at_target = formats_arr.iter().any(|f| {
+                is_playable_video_entry(f)
+                    && f["height"].as_u64() == Some(target_h)
+                    && f["acodec"].as_str().unwrap_or("none").trim() != "none"
+            });
+            return !has_progressive_at_target;
+        }
+        return false;
+    }
+
+    if let Some(req_arr) = json["requested_formats"].as_array() {
+        if req_arr.len() >= 2 {
+            let has_v = req_arr
+                .iter()
+                .any(|f| f["vcodec"].as_str().unwrap_or("none").trim() != "none");
+            let has_a = req_arr.iter().any(|f| {
+                f["vcodec"].as_str().unwrap_or("none").trim() == "none"
+                    && f["acodec"].as_str().unwrap_or("none").trim() != "none"
+            });
+            return has_v && has_a;
+        }
+    }
+
+    false
 }
 
 /// Inspects a `yt-dlp --dump-single-json` document and resolves direct HTTP(S) progressive or
@@ -922,6 +1132,10 @@ pub fn extract_direct_stream_plan(
     let requested_max_h = parse_requested_height(format_id);
     let audio_mode = want_audio_only
         || matches!(format_id, Some("audio_mp3") | Some("audio_m4a"));
+    let expected_max_h = json["formats"]
+        .as_array()
+        .filter(|a| !a.is_empty() && !audio_mode)
+        .and_then(|arr| max_playable_video_height_under_cap(arr, requested_max_h));
 
     // 1. Select cleanly from full `formats` array first so cached inspect metadata
     // honors the user's exact format/resolution choice (rather than yt-dlp's default requested_formats).
@@ -947,23 +1161,32 @@ pub fn extract_direct_stream_plan(
                 // Exact custom format ID lookup if caller passed raw yt-dlp format id (e.g. "22", "137")
                 if let Some(fid) = format_id.map(str::trim).filter(|s| !s.is_empty()) {
                     if requested_max_h.is_none() {
-                        if let Some(raw_match) = formats_arr
+                        if let Some(raw_entry) = formats_arr
                             .iter()
                             .find(|f| f["format_id"].as_str() == Some(fid))
-                            .and_then(|f| parse_direct_http_stream(f, root_headers))
                         {
+                            let Some(raw_match) = parse_direct_http_stream(raw_entry, root_headers)
+                            else {
+                                return None;
+                            };
                             if raw_match.acodec != "none" && raw_match.vcodec != "none" {
                                 return Some(VideoStreamPlan::SingleStream(raw_match));
-                            } else if raw_match.vcodec != "none" && allow_split {
-                                if let Some(audio) = select_best_audio_stream(&direct_streams, prefer_m4a) {
-                                    return Some(VideoStreamPlan::SplitVideoAudio {
-                                        video: raw_match,
-                                        audio,
-                                    });
+                            } else if raw_match.vcodec != "none" {
+                                if allow_split {
+                                    if let Some(audio) =
+                                        select_best_audio_stream(&direct_streams, prefer_m4a)
+                                    {
+                                        return Some(VideoStreamPlan::SplitVideoAudio {
+                                            video: raw_match,
+                                            audio,
+                                        });
+                                    }
                                 }
+                                return None;
                             } else if raw_match.acodec != "none" {
                                 return Some(VideoStreamPlan::SingleStream(raw_match));
                             }
+                            return None;
                         }
                     }
                 }
@@ -974,7 +1197,8 @@ pub fn extract_direct_stream_plan(
                 let eligible_videos: Vec<&ResolvedHttpStream> = direct_streams
                     .iter()
                     .filter(|s| {
-                        s.vcodec != "none" && (s.acodec != "none" || (allow_split && best_audio.is_some()))
+                        s.vcodec != "none"
+                            && (s.acodec != "none" || (allow_split && best_audio.is_some()))
                     })
                     .collect();
 
@@ -1000,13 +1224,19 @@ pub fn extract_direct_stream_plan(
                         .max_by_key(|s| {
                             let h = s.height.unwrap_or(0);
                             let compat = video_container_compatibility_score(s, effective_target_ext);
-                            let progressive_bonus = if !allow_split && s.acodec != "none" { 1u8 } else { 0u8 };
+                            let progressive_bonus =
+                                if !allow_split && s.acodec != "none" { 1u8 } else { 0u8 };
                             let fps = s.fps.unwrap_or(0);
                             let size_or_tbr = s.filesize.unwrap_or(s.tbr_kbps);
                             (h, progressive_bonus, compat, fps, size_or_tbr)
                         })
                         .cloned()
                     {
+                        if let Some(min_h) = expected_max_h {
+                            if chosen_video.height.unwrap_or(0) < min_h {
+                                return None;
+                            }
+                        }
                         if chosen_video.acodec != "none" {
                             return Some(VideoStreamPlan::SingleStream(chosen_video));
                         }
@@ -1021,6 +1251,9 @@ pub fn extract_direct_stream_plan(
                     }
                 }
             }
+        }
+        if !audio_mode && expected_max_h.is_some() {
+            return None;
         }
     }
 
@@ -1047,7 +1280,10 @@ pub fn extract_direct_stream_plan(
                 }
             } else if resolved.len() == 1 {
                 let only = resolved.into_iter().next()?;
-                if requested_max_h.map_or(true, |cap| only.height.map_or(true, |h| h <= cap)) {
+                let cap_ok =
+                    requested_max_h.map_or(true, |cap| only.height.map_or(true, |h| h <= cap));
+                let height_ok = expected_max_h.map_or(true, |min_h| only.height.unwrap_or(0) >= min_h);
+                if cap_ok && height_ok {
                     return Some(VideoStreamPlan::SingleStream(only));
                 }
             } else if allow_split && resolved.len() >= 2 {
@@ -1059,7 +1295,11 @@ pub fn extract_direct_stream_plan(
                         .or_else(|| resolved.iter().rfind(|s| s.acodec != "none"))
                         .cloned(),
                 ) {
-                    if requested_max_h.map_or(true, |cap| video.height.map_or(true, |h| h <= cap)) {
+                    let cap_ok = requested_max_h
+                        .map_or(true, |cap| video.height.map_or(true, |h| h <= cap));
+                    let height_ok =
+                        expected_max_h.map_or(true, |min_h| video.height.unwrap_or(0) >= min_h);
+                    if cap_ok && height_ok {
                         return Some(VideoStreamPlan::SplitVideoAudio { video, audio });
                     }
                 }
@@ -1069,8 +1309,18 @@ pub fn extract_direct_stream_plan(
 
     // 3. Single-stream top-level URL fallback (when extractor returns direct stream object)
     if let Some(single) = parse_direct_http_stream(json, root_headers) {
-        if !audio_mode || single.acodec != "none" {
-            return Some(VideoStreamPlan::SingleStream(single));
+        if audio_mode {
+            if single.acodec != "none" {
+                return Some(VideoStreamPlan::SingleStream(single));
+            }
+        } else {
+            let cap_ok =
+                requested_max_h.map_or(true, |cap| single.height.map_or(true, |h| h <= cap));
+            let height_ok =
+                expected_max_h.map_or(true, |min_h| single.height.unwrap_or(0) >= min_h);
+            if cap_ok && height_ok {
+                return Some(VideoStreamPlan::SingleStream(single));
+            }
         }
     }
 
@@ -1569,9 +1819,30 @@ mod tests {
             other => panic!("expected SplitVideoAudio, got {:?}", other),
         }
 
-        // Without FFmpeg split allowed, falls back to progressive SingleStream (itag 18)
-        let plan_prog = extract_direct_stream_plan(&formats_json, Some("1080p_mp4"), "mp4", false, false)
-            .expect("no-split fallback should pick progressive 360p");
+        // Without FFmpeg split allowed, high-res requests (1080p/2160p) must return None instead
+        // of silently downgrading to progressive 360p; explicit 360p progressive still works.
+        assert!(
+            extract_direct_stream_plan(&formats_json, Some("1080p_mp4"), "mp4", false, false)
+                .is_none(),
+            "1080p_mp4 must not silently downgrade to 360p when FFmpeg is absent"
+        );
+        assert!(
+            extract_direct_stream_plan(&formats_json, Some("2160p_mp4"), "mp4", false, false)
+                .is_none(),
+            "2160p_mp4 must not silently downgrade to 360p when FFmpeg is absent"
+        );
+        assert!(
+            extract_direct_stream_plan(&formats_json, Some("137"), "mp4", false, false).is_none(),
+            "Explicit split format_id must not downgrade to 360p when FFmpeg is absent"
+        );
+        assert!(
+            extract_direct_stream_plan(&formats_json, Some("hls1"), "mp4", false, true).is_none(),
+            "Explicit HLS format_id must return None so yt-dlp handles it"
+        );
+
+        let plan_prog =
+            extract_direct_stream_plan(&formats_json, Some("360p_mp4"), "mp4", false, false)
+                .expect("360p_mp4 should resolve progressive SingleStream even without FFmpeg");
         match plan_prog {
             VideoStreamPlan::SingleStream(s) => assert_eq!(s.height, Some(360)),
             other => panic!("expected SingleStream, got {:?}", other),
@@ -1635,6 +1906,175 @@ mod tests {
             }]
         });
         assert!(extract_direct_stream_plan(&hls_only, None, "mp4", false, true).is_none());
+
+        // Mixed 2160p HLS + 360p HTTPS must NOT silently downgrade 2160p -> 360p
+        let mixed_hls_high = serde_json::json!({
+            "formats": [
+                {
+                    "format_id": "18",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=18",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": "avc1.42001E",
+                    "acodec": "mp4a.40.2",
+                    "height": 360
+                },
+                {
+                    "format_id": "hls_4k",
+                    "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/index.m3u8",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                    "vcodec": "vp9",
+                    "acodec": "none",
+                    "height": 2160
+                },
+                {
+                    "format_id": "140",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=140",
+                    "ext": "m4a",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2"
+                }
+            ]
+        });
+        assert!(
+            extract_direct_stream_plan(&mixed_hls_high, Some("2160p_mp4"), "mp4", false, true)
+                .is_none(),
+            "Mixed 2160p HLS + 360p progressive must delegate to yt-dlp for 2160p"
+        );
+    }
+
+    #[test]
+    fn test_ffmpeg_specs_gzip_extraction_and_split_detection() {
+        use flate2::write::GzEncoder;
+
+        for (os, arch, expected_suffix) in [
+            ("windows", "x86_64", "ffmpeg-win32-x64.gz"),
+            ("windows", "aarch64", "ffmpeg-win32-x64.gz"),
+            ("macos", "aarch64", "ffmpeg-darwin-arm64.gz"),
+            ("macos", "x86_64", "ffmpeg-darwin-x64.gz"),
+            ("linux", "x86_64", "ffmpeg-linux-x64.gz"),
+            ("linux", "aarch64", "ffmpeg-linux-arm64.gz"),
+            ("linux", "arm", "ffmpeg-linux-arm.gz"),
+            ("linux", "x86", "ffmpeg-linux-ia32.gz"),
+        ] {
+            let spec = ffmpeg_download_spec(os, arch).expect("ffmpeg spec must exist");
+            assert!(
+                spec.url.ends_with(expected_suffix),
+                "unexpected spec URL for {}/{}: {}",
+                os,
+                arch,
+                spec.url
+            );
+            assert!(spec.min_compressed_bytes >= 1_000_000);
+            assert!(spec.min_extracted_bytes >= 5_000_000);
+        }
+
+        // GZIP extraction roundtrip & corrupt rejection
+        let base = std::env::temp_dir().join(format!("dc_gz_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let payload = b"synthetic-ffmpeg-binary-payload-for-test-".repeat(256);
+        let mut gz_bytes = Vec::new();
+        {
+            let mut enc = GzEncoder::new(&mut gz_bytes, Compression::default());
+            enc.write_all(&payload).unwrap();
+            enc.finish().unwrap();
+        }
+        let gz_path = base.join("ffmpeg.gz");
+        let out_path = base.join("bin").join("ffmpeg");
+        std::fs::write(&gz_path, &gz_bytes).unwrap();
+
+        let extracted = extract_gzip_file(&gz_path, &out_path).expect("valid gzip should extract");
+        assert_eq!(extracted, payload.len() as u64);
+        assert_eq!(std::fs::read(&out_path).unwrap(), payload);
+
+        let bad_gz_path = base.join("corrupt.gz");
+        let bad_out_path = base.join("bin").join("bad_ffmpeg");
+        std::fs::write(&bad_gz_path, &gz_bytes[..gz_bytes.len() / 2]).unwrap();
+        assert!(extract_gzip_file(&bad_gz_path, &bad_out_path).is_err());
+        assert!(
+            !bad_out_path.exists(),
+            "failed gzip extraction must clean up partial output"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Split requirement detection across YouTube 4K + 360p + audio + VP8/VP9 scoring
+        let yt_4k = serde_json::json!({
+            "formats": [
+                {
+                    "format_id": "18",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=18",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": "avc1.42001E",
+                    "acodec": "mp4a.40.2",
+                    "height": 360,
+                    "filesize": 120_000_000u64
+                },
+                {
+                    "format_id": "271",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=271",
+                    "ext": "webm",
+                    "protocol": "https",
+                    "vcodec": "vp8",
+                    "acodec": "none",
+                    "height": 2160,
+                    "filesize": 2_900_000_000u64
+                },
+                {
+                    "format_id": "313",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=313",
+                    "ext": "webm",
+                    "protocol": "https",
+                    "vcodec": "vp9",
+                    "acodec": "none",
+                    "height": 2160,
+                    "filesize": 2_400_000_000u64
+                },
+                {
+                    "format_id": "140",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=140",
+                    "ext": "m4a",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "abr": 128.0,
+                    "filesize": 20_000_000u64
+                }
+            ]
+        });
+
+        assert!(requested_height_requires_split(&yt_4k, Some("2160p_mp4")));
+        assert!(requested_height_requires_split(&yt_4k, Some("313")));
+        assert!(!requested_height_requires_split(&yt_4k, Some("360p_mp4")));
+        assert!(!requested_height_requires_split(&yt_4k, Some("audio_mp3")));
+        assert!(!requested_height_requires_split(&yt_4k, Some("audio_m4a")));
+
+        // VP9 WebM must rank ahead of VP8 WebM when targeting MP4 container
+        match extract_direct_stream_plan(&yt_4k, Some("2160p_mp4"), "mp4", false, true).unwrap() {
+            VideoStreamPlan::SplitVideoAudio { video, audio } => {
+                assert_eq!(video.vcodec, "vp9");
+                assert_eq!(audio.ext, "m4a");
+            }
+            other => panic!("expected SplitVideoAudio, got {:?}", other),
+        }
+
+        // Generic video with no separate audio track does NOT require FFmpeg split
+        let generic_muxed = serde_json::json!({
+            "formats": [{
+                "format_id": "hd",
+                "url": "https://cdn.example.com/1080p.mp4",
+                "ext": "mp4",
+                "protocol": "https",
+                "vcodec": "avc1",
+                "acodec": "none",
+                "height": 1080
+            }]
+        });
+        assert!(!requested_height_requires_split(&generic_muxed, Some("1080p_mp4")));
     }
 
     #[test]

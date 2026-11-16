@@ -949,6 +949,140 @@ async fn ensure_js_runtime_bin() -> Result<Option<String>, String> {
     Ok(Some(format!("quickjs:{}", dest_path.display())))
 }
 
+fn is_valid_ffmpeg_candidate(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
+    }
+    if let Some(managed_dir) = user_bin_dir() {
+        if path.parent() == Some(managed_dir.as_path()) {
+            return meta.len() >= 10_000_000;
+        }
+    }
+    true
+}
+
+fn find_valid_ffmpeg_in_dirs(extra_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let mut search_dirs: Vec<PathBuf> = extra_dirs.to_vec();
+    if let Some(path_env) = std::env::var_os("PATH") {
+        search_dirs.extend(std::env::split_paths(&path_env));
+    }
+    let suffix = std::env::consts::EXE_SUFFIX;
+    for dir in search_dirs {
+        let candidate = if !suffix.is_empty() {
+            dir.join(format!("ffmpeg{}", suffix))
+        } else {
+            dir.join("ffmpeg")
+        };
+        if is_valid_ffmpeg_candidate(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn get_ffmpeg_bin() -> Option<PathBuf> {
+    find_valid_ffmpeg_in_dirs(&default_tool_dirs())
+}
+
+fn ffmpeg_provision_lock() -> &'static tokio::sync::Mutex<()> {
+    static FFMPEG_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    FFMPEG_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn ensure_ffmpeg_bin() -> Result<PathBuf, String> {
+    if let Some(existing) = get_ffmpeg_bin() {
+        return Ok(existing);
+    }
+
+    let _guard = ffmpeg_provision_lock().lock().await;
+    if let Some(existing) = get_ffmpeg_bin() {
+        return Ok(existing);
+    }
+
+    let spec = core_engine::video_runtime::ffmpeg_download_spec(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+    .ok_or_else(|| {
+        format!(
+            "Paket FFmpeg otomatis tidak tersedia untuk arsitektur {}/{}. Pasang FFmpeg di PATH sistem untuk menggabungkan video HD/4K.",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+
+    let bin_dir = user_bin_dir()
+        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang FFmpeg.".to_string())?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
+
+    let bin_name = format!("ffmpeg{}", std::env::consts::EXE_SUFFIX);
+    let dest_path = bin_dir.join(&bin_name);
+    let gz_tmp = bin_dir.join(format!("{}.gz.download", bin_name));
+    let extract_tmp = bin_dir.join(format!("{}.download", bin_name));
+    let _ = std::fs::remove_file(&gz_tmp);
+    let _ = std::fs::remove_file(&extract_tmp);
+
+    log::info!("Mengunduh komponen FFmpeg otomatis dari {}", spec.url);
+    download_tool_file(
+        "ffmpeg-bootstrap",
+        spec.url,
+        &gz_tmp,
+        spec.min_compressed_bytes,
+        "FFmpeg",
+    )
+    .await?;
+
+    let gz_for_extract = gz_tmp.clone();
+    let extract_for_blocking = extract_tmp.clone();
+    let extract_res = tokio::task::spawn_blocking(move || {
+        core_engine::video_runtime::extract_gzip_file(&gz_for_extract, &extract_for_blocking)
+    })
+    .await
+    .map_err(|e| format!("Gagal mengekstrak arsip FFmpeg: {}", e))?;
+    let _ = std::fs::remove_file(&gz_tmp);
+
+    let extracted_len = match extract_res {
+        Ok(len) => len,
+        Err(e) => {
+            let _ = std::fs::remove_file(&extract_tmp);
+            return Err(e);
+        }
+    };
+    if extracted_len < spec.min_extracted_bytes {
+        let _ = std::fs::remove_file(&extract_tmp);
+        return Err(format!(
+            "Binari FFmpeg hasil ekstraksi tidak valid atau terpotong ({} byte).",
+            extracted_len
+        ));
+    }
+
+    set_file_executable_if_unix(&extract_tmp);
+    if dest_path.exists() {
+        let _ = std::fs::remove_file(&dest_path);
+    }
+    std::fs::rename(&extract_tmp, &dest_path).map_err(|e| {
+        let _ = std::fs::remove_file(&extract_tmp);
+        format!("Gagal menempatkan FFmpeg ke {}: {}", dest_path.display(), e)
+    })?;
+
+    Ok(dest_path)
+}
+
+fn parse_requested_height_opt(format_id: Option<&str>) -> Option<u32> {
+    let fid = format_id?.trim();
+    if let Some(h) = fid.strip_suffix("p_mp4") {
+        return h.parse::<u32>().ok().filter(|&v| v > 0);
+    }
+    if let Some(h) = fid.strip_suffix('p') {
+        return h.parse::<u32>().ok().filter(|&v| v > 0);
+    }
+    None
+}
+
 async fn ensure_ytdlp_ready_for_video() -> Result<String, String> {
     let (ytdlp_res, qjs_res) = tokio::join!(ensure_ytdlp_bin(), ensure_js_runtime_bin());
     if let Err(err) = qjs_res {
@@ -1042,8 +1176,8 @@ fn sanitize_media_title(raw: &str, fallback: &str) -> String {
     if cleaned == "download.bin" && !trimmed.eq_ignore_ascii_case("download.bin") {
         return fallback.to_string();
     }
-    if cleaned.chars().count() > 160 {
-        cleaned = cleaned.chars().take(160).collect::<String>();
+    if cleaned.chars().count() > 120 {
+        cleaned = cleaned.chars().take(120).collect::<String>();
         cleaned = cleaned.trim().trim_end_matches(['.', ' ']).to_string();
         if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
             return fallback.to_string();
@@ -1322,6 +1456,13 @@ async fn inspect_video_url_uncached(
     auth_username: Option<&str>,
     auth_password: Option<&str>,
 ) -> Result<InspectResult, String> {
+    if get_ffmpeg_bin().is_none() {
+        tokio::spawn(async {
+            if let Err(e) = ensure_ffmpeg_bin().await {
+                log::warn!("Warmup auto-provisioning FFmpeg saat inspeksi gagal: {}", e);
+            }
+        });
+    }
     let bin = ensure_ytdlp_ready_for_video().await?;
     let is_yt = is_youtube_url(url);
     let has_custom_headers = cookie.is_some() || user_agent.is_some();
@@ -2053,14 +2194,28 @@ fn build_ytdlp_format_selector(
     is_audio: bool,
     has_ffmpeg: bool,
 ) -> String {
+    build_ytdlp_format_selector_with_strict(format_id, target_ext, is_audio, has_ffmpeg, false)
+}
+
+fn build_ytdlp_format_selector_with_strict(
+    format_id: Option<&str>,
+    target_ext: &str,
+    is_audio: bool,
+    has_ffmpeg: bool,
+    strict_split: bool,
+) -> String {
     let parse_height_selector = |h: u32| -> String {
-        if has_ffmpeg {
+        if has_ffmpeg && strict_split {
+            format!("bestvideo[height<={h}]+bestaudio")
+        } else if has_ffmpeg {
             format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
         } else {
             format!("best[height<={h}][ext=mp4]/best[height<={h}]/best")
         }
     };
-    let default_video_selector = if has_ffmpeg {
+    let default_video_selector = if has_ffmpeg && strict_split {
+        "bestvideo+bestaudio".to_string()
+    } else if has_ffmpeg {
         "bestvideo+bestaudio/best".to_string()
     } else {
         "best[ext=mp4]/best".to_string()
@@ -2071,7 +2226,7 @@ fn build_ytdlp_format_selector(
         "bestaudio[ext=m4a]/best[ext=m4a]/bestaudio/18/best".to_string()
     };
 
-    if let Some(fid) = format_id {
+    if let Some(fid) = format_id.map(str::trim).filter(|s| !s.is_empty()) {
         if fid == "audio_mp3" {
             "bestaudio/18/best".to_string()
         } else if fid == "audio_m4a" {
@@ -2094,6 +2249,16 @@ fn build_ytdlp_format_selector(
             } else {
                 "bestaudio/18/best".to_string()
             }
+        } else if strict_split
+            && has_ffmpeg
+            && !fid.eq_ignore_ascii_case("best")
+            && !fid.eq_ignore_ascii_case("mp4")
+            && fid.chars().any(|c| c.is_ascii_digit())
+            && fid
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            format!("{fid}+bestaudio")
         } else {
             default_video_selector
         }
@@ -2157,6 +2322,93 @@ async fn wait_child_with_http_ctrl(
             }
         }
         None => child.wait().await.map(Some),
+    }
+}
+
+async fn run_ffmpeg_with_ctrl(
+    mut ff_cmd: tokio::process::Command,
+    ctrl: Option<&core_engine::DownloadController>,
+    output_path: &Path,
+) -> Result<(), Option<String>> {
+    ff_cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match ff_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(Some(format!("Gagal menjalankan FFmpeg: {}", e)));
+        }
+    };
+
+    let stderr_handle = child.stderr.take().map(|err_pipe| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut reader = tokio::io::BufReader::new(err_pipe).lines();
+            let mut ring: std::collections::VecDeque<String> =
+                std::collections::VecDeque::with_capacity(4);
+            while let Ok(Some(line)) = reader.next_line().await {
+                let clean = line.trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                if ring.len() == 4 {
+                    ring.pop_front();
+                }
+                ring.push_back(clean.to_string());
+            }
+            if ring.is_empty() {
+                None
+            } else {
+                let joined = ring.into_iter().collect::<Vec<_>>().join(" | ");
+                let clipped: String = joined.chars().take(360).collect();
+                Some(clipped)
+            }
+        })
+    });
+
+    let status_opt = wait_child_with_http_ctrl(child, ctrl).await;
+    let err_tail = if let Some(handle) = stderr_handle {
+        handle.await.ok().flatten()
+    } else {
+        None
+    };
+
+    match status_opt {
+        Ok(None) => {
+            let _ = std::fs::remove_file(output_path);
+            Err(None)
+        }
+        Ok(Some(st)) if st.success() => {
+            let valid = std::fs::metadata(output_path)
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false);
+            if valid {
+                Ok(())
+            } else {
+                let _ = std::fs::remove_file(output_path);
+                Err(Some(match err_tail {
+                    Some(msg) => format!("Berkas hasil muxing FFmpeg kosong: {}", msg),
+                    None => "Berkas hasil muxing FFmpeg kosong.".to_string(),
+                }))
+            }
+        }
+        Ok(Some(st)) => {
+            let _ = std::fs::remove_file(output_path);
+            let code_str = st
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "sinyal".to_string());
+            Err(Some(match err_tail {
+                Some(msg) => format!("FFmpeg gagal (kode {}): {}", code_str, msg),
+                None => format!("FFmpeg gagal (kode {}).", code_str),
+            }))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(output_path);
+            Err(Some(format!("Proses FFmpeg terputus: {}", e)))
+        }
     }
 }
 
@@ -2947,56 +3199,54 @@ async fn execute_direct_http_video_plan(
                     let _ = std::fs::remove_file(&mux_tmp);
                     let mut ff_cmd = tokio::process::Command::new(ff_path);
                     hide_window_tokio(&mut ff_cmd);
-                    ff_cmd.arg("-y").arg("-i").arg(&vtmp);
+                    ff_cmd.arg("-y").args(["-v", "error"]).arg("-i").arg(&vtmp);
+                    let vcodec_l = stream.vcodec.to_ascii_lowercase();
+                    let need_video_transcode = out_ext == "mp4"
+                        && (vcodec_l.starts_with("vp8") || vcodec_l.starts_with("theora"));
                     if out_ext == "mp4" {
                         let acodec_l = stream.acodec.to_ascii_lowercase();
-                        if acodec_l == "none" || acodec_l.starts_with("mp4a") || acodec_l == "aac" {
-                            ff_cmd.args(["-c", "copy", "-movflags", "+faststart"]);
-                        } else {
+                        if need_video_transcode {
                             ff_cmd.args([
                                 "-c:v",
-                                "copy",
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                "192k",
-                                "-movflags",
-                                "+faststart",
+                                "libx264",
+                                "-preset",
+                                "veryfast",
+                                "-crf",
+                                "18",
+                                "-pix_fmt",
+                                "yuv420p",
                             ]);
+                        } else {
+                            ff_cmd.args(["-c:v", "copy"]);
                         }
+                        if acodec_l == "none" || acodec_l.starts_with("mp4a") || acodec_l == "aac" {
+                            ff_cmd.args(["-c:a", "copy"]);
+                        } else {
+                            ff_cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+                        }
+                        ff_cmd.args(["-movflags", "+faststart"]);
                     } else {
                         ff_cmd.args(["-c", "copy"]);
                     }
-                    ff_cmd
-                        .arg(&mux_tmp)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null());
+                    ff_cmd.arg(&mux_tmp);
 
-                    let mux_ok = if let Ok(child) = ff_cmd.spawn() {
-                        match wait_child_with_http_ctrl(child, Some(http_ctrl)).await {
-                            Ok(None) => {
-                                let _ = std::fs::remove_file(&mux_tmp);
-                                return DirectPlanOutcome::Stopped {
-                                    paused_already_emitted: false,
-                                };
+                    let mux_err = match run_ffmpeg_with_ctrl(ff_cmd, Some(http_ctrl), &mux_tmp).await {
+                        Ok(()) => {
+                            if move_file_cross_device(&mux_tmp, target).is_ok() {
+                                remove_split_temp_files(target);
+                                return DirectPlanOutcome::Finished;
                             }
-                            Ok(Some(st)) if st.success() => std::fs::metadata(&mux_tmp)
-                                .map(|m| m.is_file() && m.len() > 0)
-                                .unwrap_or(false),
-                            _ => false,
+                            "Gagal memindahkan berkas video hasil remux.".to_string()
                         }
-                    } else {
-                        false
+                        Err(None) => {
+                            return DirectPlanOutcome::Stopped {
+                                paused_already_emitted: false,
+                            };
+                        }
+                        Err(Some(msg)) => msg,
                     };
-
-                    if mux_ok && move_file_cross_device(&mux_tmp, target).is_ok() {
-                        remove_split_temp_files(target);
-                        return DirectPlanOutcome::Finished;
-                    }
                     remove_split_temp_files(target);
-                    return DirectPlanOutcome::FallbackToYtDlp(Some(
-                        "Gagal meremux container video ke format tujuan.".to_string(),
-                    ));
+                    return DirectPlanOutcome::FallbackToYtDlp(Some(mux_err));
                 } else {
                     return DirectPlanOutcome::FallbackToYtDlp(None);
                 }
@@ -3214,11 +3464,30 @@ async fn execute_direct_http_video_plan(
             hide_window_tokio(&mut ff_cmd);
             ff_cmd
                 .arg("-y")
+                .args(["-v", "error"])
                 .arg("-i")
                 .arg(&vtmp)
                 .arg("-i")
                 .arg(&atmp)
-                .args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]);
+                .args(["-map", "0:v:0", "-map", "1:a:0"]);
+
+            let vcodec_l = video.vcodec.to_ascii_lowercase();
+            let need_video_transcode = out_ext == "mp4"
+                && (vcodec_l.starts_with("vp8") || vcodec_l.starts_with("theora"));
+            if need_video_transcode {
+                ff_cmd.args([
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]);
+            } else {
+                ff_cmd.args(["-c:v", "copy"]);
+            }
 
             let is_mp4_audio = audio.ext.eq_ignore_ascii_case("m4a")
                 || audio.acodec.to_ascii_lowercase().starts_with("mp4a")
@@ -3231,37 +3500,25 @@ async fn execute_direct_http_video_plan(
             if out_ext == "mp4" {
                 ff_cmd.args(["-movflags", "+faststart"]);
             }
-            ff_cmd
-                .arg(&mux_tmp)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
+            ff_cmd.arg(&mux_tmp);
 
-            let mux_ok = if let Ok(child) = ff_cmd.spawn() {
-                match wait_child_with_http_ctrl(child, Some(http_ctrl)).await {
-                    Ok(None) => {
-                        let _ = std::fs::remove_file(&mux_tmp);
-                        return DirectPlanOutcome::Stopped {
-                            paused_already_emitted: false,
-                        };
+            let mux_err = match run_ffmpeg_with_ctrl(ff_cmd, Some(http_ctrl), &mux_tmp).await {
+                Ok(()) => {
+                    if move_file_cross_device(&mux_tmp, target).is_ok() {
+                        remove_split_temp_files(target);
+                        return DirectPlanOutcome::Finished;
                     }
-                    Ok(Some(st)) if st.success() => std::fs::metadata(&mux_tmp)
-                        .map(|m| m.is_file() && m.len() > 0)
-                        .unwrap_or(false),
-                    _ => false,
+                    "Gagal memindahkan berkas video hasil muxing.".to_string()
                 }
-            } else {
-                false
+                Err(None) => {
+                    return DirectPlanOutcome::Stopped {
+                        paused_already_emitted: false,
+                    };
+                }
+                Err(Some(msg)) => msg,
             };
-
-            if mux_ok && move_file_cross_device(&mux_tmp, target).is_ok() {
-                remove_split_temp_files(target);
-                DirectPlanOutcome::Finished
-            } else {
-                remove_split_temp_files(target);
-                DirectPlanOutcome::FallbackToYtDlp(Some(
-                    "Muxing video + audio FFmpeg tidak berhasil.".to_string(),
-                ))
-            }
+            remove_split_temp_files(target);
+            DirectPlanOutcome::FallbackToYtDlp(Some(mux_err))
         }
     }
 }
@@ -3384,6 +3641,14 @@ async fn start_real_download_with_controller(
                 None,
             );
 
+            if get_ffmpeg_bin().is_none() {
+                tokio::spawn(async {
+                    if let Err(e) = ensure_ffmpeg_bin().await {
+                        log::warn!("Warmup auto-provisioning FFmpeg saat mulai unduhan: {}", e);
+                    }
+                });
+            }
+
             let ytdlp_res = tokio::select! {
                 res = ensure_ytdlp_ready_for_video() => Some(res),
                 _ = http_ctrl.notified() => None,
@@ -3415,12 +3680,10 @@ async fn start_real_download_with_controller(
                 let is_audio = matches!(target_ext.as_str(), "mp3" | "m4a" | "flac" | "wav")
                     || matches!(format_id.as_deref(), Some("audio_mp3") | Some("audio_m4a"));
 
-                // Locate ffmpeg before selecting streams so progressive fallback works if ffmpeg is absent
-                let ffmpeg_path = find_executable_in_dirs(&["ffmpeg"], &default_tool_dirs());
-                let has_ffmpeg = ffmpeg_path.is_some();
+                let mut raw_key_opt: Option<String> = None;
+                let mut fetched_from_cache = false;
+                let mut current_json: Option<serde_json::Value> = None;
 
-                // Fast path: resolve direct HTTP(S) streams (progressive or split DASH video+audio)
-                // and run through multi-connection core_engine::Downloader with up to 32 threads!
                 if !is_direct_manifest_url(&url) {
                     let raw_key = raw_video_cache_key(
                         &url,
@@ -3432,9 +3695,9 @@ async fn start_real_download_with_controller(
                         auth_password.as_deref(),
                     );
                     let cached_json = get_cached_raw_ytdlp_json(&raw_key);
-                    let mut fetched_from_cache = cached_json.is_some();
+                    fetched_from_cache = cached_json.is_some();
 
-                    let mut current_json = match cached_json {
+                    current_json = match cached_json {
                         Some(v) => Some(v),
                         None => {
                             match fetch_video_json_for_download(
@@ -3478,7 +3741,86 @@ async fn start_real_download_with_controller(
                             }
                         }
                     };
+                    raw_key_opt = Some(raw_key);
+                }
 
+                let split_required_by_video = !is_audio
+                    && current_json.as_ref().map_or_else(
+                        || parse_requested_height_opt(format_id.as_deref()).map_or(true, |h| h > 360),
+                        |j| core_engine::video_runtime::requested_height_requires_split(j, format_id.as_deref()),
+                    );
+                let conversion_needs_ffmpeg = is_audio && target_ext != "m4a";
+
+                let mut ffmpeg_path = get_ffmpeg_bin();
+                if ffmpeg_path.is_none() && (split_required_by_video || conversion_needs_ffmpeg) {
+                    emit_simple_telemetry(
+                        &app,
+                        &task_id,
+                        0,
+                        0,
+                        0,
+                        4.0,
+                        None,
+                        "downloading",
+                        &target,
+                        None,
+                    );
+
+                    let ff_res = tokio::select! {
+                        res = ensure_ffmpeg_bin() => Some(res),
+                        _ = http_ctrl.notified() => None,
+                    };
+                    let Some(ff_res) = ff_res else {
+                        unregister_active_download(&task_id);
+                        if http_ctrl.is_canceled() {
+                            remove_task_target(&task_id);
+                            cleanup_download_artifacts(&target);
+                            emit_simple_telemetry(
+                                &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                            );
+                        } else {
+                            emit_simple_telemetry(
+                                &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+                            );
+                        }
+                        return;
+                    };
+                    match ff_res {
+                        Ok(p) => ffmpeg_path = Some(p),
+                        Err(e) => {
+                            if ytdlp_error_detail.is_none() {
+                                ytdlp_error_detail = Some(e);
+                            }
+                        }
+                    }
+                }
+                let has_ffmpeg = ffmpeg_path.is_some();
+
+                if !has_ffmpeg && split_required_by_video {
+                    unregister_active_download(&task_id);
+                    remove_task_target(&task_id);
+                    let msg = ytdlp_error_detail.unwrap_or_else(|| {
+                        "FFmpeg diperlukan untuk mengunduh & menggabungkan video resolusi tinggi tanpa turun ke SD."
+                            .to_string()
+                    });
+                    emit_simple_telemetry(
+                        &app,
+                        &task_id,
+                        0,
+                        0,
+                        0,
+                        0.0,
+                        None,
+                        "error",
+                        &target,
+                        Some(msg),
+                    );
+                    return;
+                }
+
+                // Fast path: resolve direct HTTP(S) streams (progressive or split DASH video+audio)
+                // and run through multi-connection core_engine::Downloader with up to 32 threads!
+                if let Some(ref raw_key) = raw_key_opt {
                     for attempt in 0..2 {
                         let Some(ref json_val) = current_json else {
                             break;
@@ -3579,7 +3921,7 @@ async fn start_real_download_with_controller(
                                 return;
                             }
                             DirectPlanOutcome::FallbackToYtDlp(err_msg) => {
-                                invalidate_cached_raw_ytdlp_json(&raw_key);
+                                invalidate_cached_raw_ytdlp_json(raw_key);
                                 if let Some(msg) = err_msg {
                                     log::warn!(
                                         "Direct HTTP stream fallback for {} (attempt {}): {}",
@@ -3587,6 +3929,7 @@ async fn start_real_download_with_controller(
                                         attempt + 1,
                                         msg
                                     );
+                                    ytdlp_error_detail = Some(msg);
                                 }
                                 // If initial URL came from short-lived cache, refresh JSON once cleanly.
                                 if fetched_from_cache && attempt == 0 {
@@ -3622,7 +3965,7 @@ async fn start_real_download_with_controller(
                                             return;
                                         }
                                         Some(Ok(fresh)) => {
-                                            put_cached_raw_ytdlp_json(&raw_key, &fresh);
+                                            put_cached_raw_ytdlp_json(raw_key, &fresh);
                                             current_json = Some(fresh);
                                             continue;
                                         }
@@ -3710,21 +4053,24 @@ async fn start_real_download_with_controller(
                 );
 
                 if let Some(ref ff_path) = ffmpeg_path {
-                    if let Some(ffmpeg_dir) = ff_path.parent() {
-                        cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
-                    }
+                    cmd.arg("--ffmpeg-location").arg(ff_path);
                 }
 
-                let fmt_selector = build_ytdlp_format_selector(
+                let fmt_selector = build_ytdlp_format_selector_with_strict(
                     format_id.as_deref(),
                     &target_ext,
                     is_audio,
                     has_ffmpeg,
+                    split_required_by_video,
                 );
 
                 cmd.arg("-f").arg(&fmt_selector);
                 if !is_audio && has_ffmpeg {
-                    cmd.arg("--merge-output-format").arg("mp4");
+                    let merge_ext = match target_ext.as_str() {
+                        "mkv" | "webm" => target_ext.as_str(),
+                        _ => "mp4",
+                    };
+                    cmd.arg("--merge-output-format").arg(merge_ext);
                 }
                 cmd.arg("-o").arg(&tmp_video);
                 cmd.arg(&url);
@@ -6730,7 +7076,14 @@ pub fn run() {
                         log::warn!("Auto-provisioning awal runtime JS belum berhasil: {}", e);
                     }
                 };
-                tokio::join!(ytdlp_fut, js_fut);
+                let ffmpeg_fut = async {
+                    if get_ffmpeg_bin().is_none() {
+                        if let Err(e) = ensure_ffmpeg_bin().await {
+                            log::warn!("Auto-provisioning awal FFmpeg belum berhasil: {}", e);
+                        }
+                    }
+                };
+                tokio::join!(ytdlp_fut, js_fut, ffmpeg_fut);
             });
             tauri::async_runtime::spawn(async move {
                 start_browser_bridge_server(handle).await;
@@ -7030,7 +7383,7 @@ mod tests {
         assert_eq!(sanitize_media_title("CON", "Video"), "_CON");
         assert_eq!(sanitize_media_title("Video: Test? <1>...", "Video"), "Video_ Test_ _1_");
         assert_eq!(sanitize_media_title("   ", "Video"), "Video");
-        assert!(sanitize_media_title(&"a".repeat(220), "Video").chars().count() <= 160);
+        assert!(sanitize_media_title(&"a".repeat(220), "Video").chars().count() <= 120);
 
         assert_eq!(
             path_to_file_uri(Path::new("/tmp/My Downloads/file 100%.zip")),
@@ -7093,7 +7446,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.3");
+        assert_eq!(info.version, "1.0.4");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
@@ -7121,21 +7474,21 @@ mod tests {
         );
 
         let nsis_cmd = build_windows_update_cmd(
-            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.3_x64-setup.exe"),
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.4_x64-setup.exe"),
             Path::new(r"C:\Users\Alice\AppData\Local\Download Cepat\Download Cepat.exe"),
             false,
         )
         .expect("valid NSIS script");
-        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.3_x64-setup.exe\" /S"));
+        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.4_x64-setup.exe\" /S"));
         assert!(nsis_cmd.contains("start \"\" \"C:\\Users\\Alice\\AppData\\Local\\Download Cepat\\Download Cepat.exe\""));
 
         let msi_cmd = build_windows_update_cmd(
-            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.3_x64.msi"),
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.4_x64.msi"),
             Path::new(r"C:\Program Files\Download Cepat\Download Cepat.exe"),
             true,
         )
         .expect("valid MSI script");
-        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.3_x64.msi\" /passive /norestart"));
+        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.4_x64.msi\" /passive /norestart"));
 
         // Injection / unsafe batch chars must be rejected
         assert!(build_windows_update_cmd(
@@ -7204,6 +7557,18 @@ mod tests {
             "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
         );
         assert_eq!(
+            build_ytdlp_format_selector_with_strict(Some("2160p_mp4"), "mp4", false, true, true),
+            "bestvideo[height<=2160]+bestaudio"
+        );
+        assert_eq!(
+            build_ytdlp_format_selector_with_strict(None, "mp4", false, true, true),
+            "bestvideo+bestaudio"
+        );
+        assert_eq!(
+            build_ytdlp_format_selector_with_strict(Some("313"), "mp4", false, true, true),
+            "313+bestaudio"
+        );
+        assert_eq!(
             build_ytdlp_format_selector(Some("720p_mp4"), "mp4", false, false),
             "best[height<=720][ext=mp4]/best[height<=720]/best"
         );
@@ -7216,13 +7581,32 @@ mod tests {
             "bestaudio[ext=m4a]/bestaudio/18/best"
         );
 
+        assert_eq!(parse_requested_height_opt(Some("2160p_mp4")), Some(2160));
+        assert_eq!(parse_requested_height_opt(Some("1080p")), Some(1080));
+        assert_eq!(parse_requested_height_opt(Some("audio_mp3")), None);
+
+        let ff_dir = std::env::temp_dir().join(format!("dc_ff_check_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ff_dir);
+        std::fs::create_dir_all(&ff_dir).expect("create ff check dir");
+        let empty_ff = ff_dir.join("empty_ffmpeg");
+        let valid_ff = ff_dir.join("system_ffmpeg");
+        std::fs::write(&empty_ff, b"").expect("write empty");
+        std::fs::write(&valid_ff, b"elf").expect("write non-empty");
+        assert!(!is_valid_ffmpeg_candidate(&ff_dir.join("missing")));
+        assert!(!is_valid_ffmpeg_candidate(&empty_ff));
+        assert!(is_valid_ffmpeg_candidate(&valid_ff));
+        let _ = std::fs::remove_dir_all(&ff_dir);
+
         let stream = core_engine::video_runtime::ResolvedHttpStream {
             url: "https://rr1.googlevideo.com/videoplayback".to_string(),
             ext: "mp4".to_string(),
-            height: Some(1080),
-            filesize: Some(1024),
             vcodec: "avc1".to_string(),
             acodec: "none".to_string(),
+            filesize: Some(1024),
+            height: Some(1080),
+            fps: None,
+            tbr_kbps: 0,
+            abr_kbps: 0,
             user_agent: Some("StreamUA/1.0".to_string()),
             referer: None,
             cookie_header: None,

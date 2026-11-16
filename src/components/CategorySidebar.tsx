@@ -31,7 +31,7 @@ export const CategorySidebar: React.FC<CategorySidebarProps> = ({
   categories,
   counts,
   defaultConnections = 8,
-  version = '1.0.3',
+  version = '1.0.4',
   author = 'Ujang Mustamar',
   onOpenBuildInfo,
 }) => {
