@@ -6,6 +6,7 @@ pub mod integrity;
 pub mod model;
 pub mod storage;
 pub mod updater;
+pub mod video_runtime;
 
 pub use downloader::{DownloadController, DownloadOptions, Downloader};
 pub use inspector::{InspectOptions, UrlInspector};
@@ -15,3 +16,4 @@ pub use model::{
 };
 pub use storage::Storage;
 pub use updater::{AppUpdateInfo, PlatformEnvironment, UpdateInstallKind};
+pub use video_runtime::VideoInspectCoordinator;

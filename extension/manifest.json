@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Download Cepat Integration Module",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "author": "Ujang Mustamar",
   "homepage_url": "https://github.com/moesstudio/download-cepat",
   "description": "Integrate browsers with Download Cepat by Ujang Mustamar: capture downloads, detect video streams, and grab batch links.",

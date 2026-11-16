@@ -2,8 +2,19 @@
 
 let cachedUrl = '';
 let cachedData = null;
-let isInspecting = false;
+let activeInspectUrl = '';
+let activeInspectPromise = null;
+let inspectGeneration = 0;
 let dcContentLang = 'id';
+
+function resetInspectCacheForUrl(nextUrl) {
+  if (nextUrl === cachedUrl) return;
+  cachedUrl = nextUrl;
+  cachedData = null;
+  activeInspectUrl = '';
+  activeInspectPromise = null;
+  inspectGeneration += 1;
+}
 
 const DC_CONTENT_I18N = {
   id: {
@@ -185,8 +196,7 @@ function showInPageToast(message, isError = false) {
 function initVideoSniffer() {
   const currentUrl = window.location.href;
   if (currentUrl !== cachedUrl) {
-    cachedUrl = currentUrl;
-    cachedData = null;
+    resetInspectCacheForUrl(currentUrl);
     clearVideoDismissedState();
   }
 
@@ -299,11 +309,21 @@ function initVideoSniffer() {
       }
     });
 
+    let hoverPrewarmTimer = null;
     btn.addEventListener('mouseenter', () => {
       btn.style.background = 'rgba(255, 255, 255, 0.15)';
+      const hoverUrl = window.location.href;
+      if (cachedUrl !== hoverUrl || !cachedData) {
+        clearTimeout(hoverPrewarmTimer);
+        hoverPrewarmTimer = setTimeout(() => {
+          if (video.dataset.downloadCepatDismissed === 'true') return;
+          prewarmFormats(window.location.href);
+        }, 80);
+      }
     });
     btn.addEventListener('mouseleave', () => {
       btn.style.background = 'transparent';
+      clearTimeout(hoverPrewarmTimer);
     });
 
     closeBtn.addEventListener('mouseenter', () => {
@@ -318,6 +338,7 @@ function initVideoSniffer() {
     closeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
+      clearTimeout(hoverPrewarmTimer);
       video.dataset.downloadCepatDismissed = 'true';
       container.remove();
     });
@@ -462,16 +483,89 @@ function renderDropdownStatusMessage(dropdown, titleText, detailText, allowRetry
       retryBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         cachedData = null;
-        loadAvailableFormats(dropdown);
+        loadAvailableFormats(dropdown, true);
       });
     }
   }
 }
 
-async function loadAvailableFormats(dropdown) {
-  const currentUrl = window.location.href;
+async function fetchFormatsForUrl(targetUrl, { forceFresh = false } = {}) {
+  if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
+    throw new Error('URL tidak didukung');
+  }
 
-  if (cachedData && cachedUrl === currentUrl) {
+  if (!forceFresh && cachedData && cachedUrl === targetUrl) {
+    return { data: cachedData, stale: false };
+  }
+
+  if (!forceFresh && activeInspectPromise && activeInspectUrl === targetUrl) {
+    return activeInspectPromise;
+  }
+
+  if (forceFresh) {
+    cachedData = null;
+    cachedUrl = targetUrl;
+    activeInspectPromise = null;
+    activeInspectUrl = '';
+    inspectGeneration += 1;
+  }
+
+  const reqGen = inspectGeneration;
+  const reqPromise = (async () => {
+    let data = null;
+    const bridgeResp = await sendExtensionBridgeMessage({
+      action: 'INSPECT_VIDEO',
+      url: targetUrl
+    });
+    if (bridgeResp) {
+      if (!bridgeResp.ok) {
+        throw new Error(bridgeResp.error || 'Bridge error');
+      }
+      data = bridgeResp.data;
+    } else {
+      const res = await fetch(`http://127.0.0.1:18291/inspect?url=${encodeURIComponent(targetUrl)}`);
+      if (!res.ok) {
+        throw new Error(`HTTP error ${res.status}`);
+      }
+      data = await res.json();
+    }
+
+    const isCurrent = reqGen === inspectGeneration && window.location.href === targetUrl;
+    if (isCurrent && data && data.status === 'ok' && Array.isArray(data.formats) && data.formats.length > 0) {
+      cachedUrl = targetUrl;
+      cachedData = data;
+    }
+    return { data, stale: !isCurrent, reqGen };
+  })().finally(() => {
+    if (activeInspectPromise === reqPromise) {
+      activeInspectPromise = null;
+      activeInspectUrl = '';
+    }
+  });
+
+  activeInspectUrl = targetUrl;
+  activeInspectPromise = reqPromise;
+  return reqPromise;
+}
+
+function prewarmFormats(targetUrl) {
+  if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
+    return;
+  }
+  if (cachedData && cachedUrl === targetUrl) {
+    return;
+  }
+  if (activeInspectPromise && activeInspectUrl === targetUrl) {
+    return;
+  }
+  fetchFormatsForUrl(targetUrl, { forceFresh: false }).catch(() => {});
+}
+
+async function loadAvailableFormats(dropdown, forceFresh = false) {
+  const targetUrl = window.location.href;
+  const startGen = inspectGeneration;
+
+  if (!forceFresh && cachedData && cachedUrl === targetUrl) {
     renderFormats(dropdown, cachedData);
     return;
   }
@@ -519,35 +613,24 @@ async function loadAvailableFormats(dropdown) {
     });
   }
 
-  if (isInspecting) return;
-  isInspecting = true;
-
   try {
-    let data = null;
-    const bridgeResp = await sendExtensionBridgeMessage({
-      action: 'INSPECT_VIDEO',
-      url: currentUrl
-    });
-    if (bridgeResp) {
-      if (!bridgeResp.ok) {
-        throw new Error(bridgeResp.error || 'Bridge error');
-      }
-      data = bridgeResp.data;
-    } else {
-      const res = await fetch(`http://127.0.0.1:18291/inspect?url=${encodeURIComponent(currentUrl)}`);
-      if (!res.ok) {
-        throw new Error(`HTTP error ${res.status}`);
-      }
-      data = await res.json();
+    const result = await fetchFormatsForUrl(targetUrl, { forceFresh });
+    if (window.location.href !== targetUrl || (!forceFresh && startGen !== inspectGeneration)) {
+      return;
+    }
+    if (!dropdown.isConnected || dropdown.style.display === 'none') {
+      return;
     }
 
+    const data = result ? result.data : null;
     if (data && data.status === 'ok' && data.formats && data.formats.length > 0) {
-      cachedData = data;
-      cachedUrl = currentUrl;
       renderFormats(dropdown, data);
     } else {
       // Fallback: check passive webRequest sniffed streams or direct <video> src tags on any site
       const sniffResp = await sendExtensionBridgeMessage({ action: 'GET_TAB_STREAMS' });
+      if (window.location.href !== targetUrl || !dropdown.isConnected || dropdown.style.display === 'none') {
+        return;
+      }
       const sniffed = (sniffResp && Array.isArray(sniffResp.streams)) ? sniffResp.streams : [];
       const domSources = Array.from(document.querySelectorAll('video[src], video source[src]'))
         .map((el) => el.src)
@@ -608,14 +691,15 @@ async function loadAvailableFormats(dropdown) {
       }
     }
   } catch (err) {
+    if (window.location.href !== targetUrl || !dropdown.isConnected || dropdown.style.display === 'none') {
+      return;
+    }
     renderDropdownStatusMessage(
       dropdown,
       dcText('disconnectedTitle'),
       dcText('disconnectedDesc'),
       true
     );
-  } finally {
-    isInspecting = false;
   }
 }
 
@@ -850,9 +934,7 @@ if (!document.getElementById('download-cepat-style')) {
 
 // Listen to YouTube SPA video navigation
 window.addEventListener('yt-navigate-finish', () => {
-  cachedData = null;
-  cachedUrl = window.location.href;
-  isInspecting = false;
+  resetInspectCacheForUrl(window.location.href);
   clearVideoDismissedState();
   setTimeout(initVideoSniffer, 500);
 });

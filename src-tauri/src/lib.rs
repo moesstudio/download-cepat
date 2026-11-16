@@ -350,27 +350,34 @@ fn apply_ytdlp_network_options(
     }
 }
 
+fn find_executable_in_specific_dir(bin_names: &[&str], dir: &Path) -> Option<PathBuf> {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    for name in bin_names {
+        let candidate = if !suffix.is_empty() && !name.ends_with(suffix) {
+            dir.join(format!("{}{}", name, suffix))
+        } else {
+            dir.join(name)
+        };
+        if candidate.is_file()
+            && std::fs::metadata(&candidate)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn find_executable_in_dirs(bin_names: &[&str], extra_dirs: &[PathBuf]) -> Option<PathBuf> {
     let mut search_dirs: Vec<PathBuf> = extra_dirs.to_vec();
     if let Some(path_env) = std::env::var_os("PATH") {
         search_dirs.extend(std::env::split_paths(&path_env));
     }
 
-    let suffix = std::env::consts::EXE_SUFFIX;
     for dir in search_dirs {
-        for name in bin_names {
-            let candidate = if !suffix.is_empty() && !name.ends_with(suffix) {
-                dir.join(format!("{}{}", name, suffix))
-            } else {
-                dir.join(name)
-            };
-            if candidate.is_file()
-                && std::fs::metadata(&candidate)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-            {
-                return Some(candidate);
-            }
+        if let Some(found) = find_executable_in_specific_dir(bin_names, &dir) {
+            return Some(found);
         }
     }
     None
@@ -382,10 +389,36 @@ fn user_home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
+fn user_bin_dir() -> Option<PathBuf> {
+    user_home_dir().map(|h| h.join(".download-cepat").join("bin"))
+}
+
+fn ytdlp_onedir_dir() -> Option<PathBuf> {
+    user_bin_dir().map(|b| b.join("yt-dlp-dir"))
+}
+
+fn get_ytdlp_onedir_bin() -> Option<PathBuf> {
+    let onedir = ytdlp_onedir_dir()?;
+    if !onedir.is_dir() || !onedir.join("_internal").is_dir() {
+        return None;
+    }
+    const ONEDIR_BIN_NAMES: &[&str] = &[
+        "yt-dlp",
+        "yt-dlp_linux",
+        "yt-dlp_linux_aarch64",
+        "yt-dlp_linux_armv7l",
+        "yt-dlp_arm64",
+        "yt-dlp_x86",
+    ];
+    find_executable_in_specific_dir(ONEDIR_BIN_NAMES, &onedir)
+}
+
 fn default_tool_dirs() -> Vec<PathBuf> {
     let mut dirs_list = Vec::new();
     if let Some(home) = user_home_dir() {
-        dirs_list.push(home.join(".download-cepat").join("bin"));
+        let bin_dir = home.join(".download-cepat").join("bin");
+        dirs_list.push(bin_dir.join("yt-dlp-dir"));
+        dirs_list.push(bin_dir);
         dirs_list.push(home.join(".download-cepat").join("venv").join("bin"));
         #[cfg(target_os = "windows")]
         dirs_list.push(home.join(".download-cepat").join("venv").join("Scripts"));
@@ -440,18 +473,52 @@ fn default_tool_dirs() -> Vec<PathBuf> {
     dirs_list
 }
 
+fn is_supported_node_bin(path: &Path) -> bool {
+    static NODE_SUPPORT_CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    let cache = NODE_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(&supported) = guard.get(path) {
+            return supported;
+        }
+    }
+
+    let mut cmd = std::process::Command::new(path);
+    hide_window_std(&mut cmd);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let supported = match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            core_engine::video_runtime::parse_node_major_version(&text)
+                .map(|major| major >= 22)
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(path.to_path_buf(), supported);
+    }
+    supported
+}
+
 fn detect_js_runtime_arg() -> Option<String> {
     let tool_dirs = default_tool_dirs();
-    let runtimes: [(&str, &[&str]); 4] = [
-        ("deno", &["deno"]),
-        ("node", &["node"]),
-        ("bun", &["bun"]),
-        ("quickjs", &["qjs", "quickjs"]),
-    ];
-    for (runtime_name, bin_names) in runtimes {
-        if let Some(path) = find_executable_in_dirs(bin_names, &tool_dirs) {
-            return Some(format!("{}:{}", runtime_name, path.display()));
+    if let Some(path) = find_executable_in_dirs(&["deno"], &tool_dirs) {
+        return Some(format!("deno:{}", path.display()));
+    }
+    if let Some(path) = find_executable_in_dirs(&["qjs", "quickjs"], &tool_dirs) {
+        return Some(format!("quickjs:{}", path.display()));
+    }
+    if let Some(path) = find_executable_in_dirs(&["node"], &tool_dirs) {
+        if is_supported_node_bin(&path) {
+            return Some(format!("node:{}", path.display()));
         }
+    }
+    if let Some(path) = find_executable_in_dirs(&["bun"], &tool_dirs) {
+        return Some(format!("bun:{}", path.display()));
     }
     None
 }
@@ -478,7 +545,14 @@ fn apply_ytdlp_runtime_env(cmd: &mut tokio::process::Command) -> bool {
 }
 
 fn get_ytdlp_bin() -> Option<String> {
-    find_executable_in_dirs(&["yt-dlp"], &default_tool_dirs()).map(|p| p.display().to_string())
+    if let Some(onedir_bin) = get_ytdlp_onedir_bin() {
+        return Some(onedir_bin.display().to_string());
+    }
+    find_executable_in_dirs(
+        &["yt-dlp", "yt-dlp_macos", "yt-dlp_linux", "yt-dlp_linux_aarch64"],
+        &default_tool_dirs(),
+    )
+    .map(|p| p.display().to_string())
 }
 
 fn ytdlp_download_url_for(os: &str, arch: &str) -> &'static str {
@@ -495,49 +569,42 @@ fn ytdlp_download_url_for(os: &str, arch: &str) -> &'static str {
     }
 }
 
-async fn ensure_ytdlp_bin() -> Result<String, String> {
-    if let Some(existing) = get_ytdlp_bin() {
-        return Ok(existing);
+fn set_file_executable_if_unix(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(path, perms);
+        }
     }
+    #[cfg(not(unix))]
+    let _ = path;
+}
 
-    static PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    let _guard = PROVISION_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
-
-    if let Some(existing) = get_ytdlp_bin() {
-        return Ok(existing);
-    }
-
-    let home = user_home_dir()
-        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang yt-dlp.".to_string())?;
-    let bin_dir = home.join(".download-cepat").join("bin");
-    std::fs::create_dir_all(&bin_dir)
-        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
-
-    let bin_name = format!("yt-dlp{}", std::env::consts::EXE_SUFFIX);
-    let dest_path = bin_dir.join(&bin_name);
-    let tmp_path = bin_dir.join(format!("{}.download", bin_name));
-    let _ = std::fs::remove_file(&tmp_path);
-
-    let url = ytdlp_download_url_for(std::env::consts::OS, std::env::consts::ARCH);
-    log::info!("Mengunduh komponen yt-dlp otomatis dari {}", url);
-
+async fn download_tool_file(
+    task_name: &str,
+    url: &str,
+    tmp_path: &Path,
+    min_bytes: u64,
+    label: &str,
+) -> Result<(), String> {
+    let _ = std::fs::remove_file(tmp_path);
     let inspector = core_engine::UrlInspector::new()
-        .map_err(|e| format!("Gagal menginisialisasi inspektor yt-dlp: {}", e))?;
+        .map_err(|e| format!("Gagal menginisialisasi inspektor {}: {}", label, e))?;
     let inspect_info = inspector
         .inspect(url)
         .await
-        .map_err(|e| format!("Komponen yt-dlp belum terpasang dan gagal diakses ({})", e))?;
+        .map_err(|e| format!("Komponen {} gagal diakses ({})", label, e))?;
 
     let downloader = core_engine::Downloader::new()
-        .map_err(|e| format!("Gagal menginisialisasi pengunduh yt-dlp: {}", e))?;
+        .map_err(|e| format!("Gagal menginisialisasi pengunduh {}: {}", label, e))?;
     downloader
         .download(
-            "ytdlp-bootstrap",
+            task_name,
             &inspect_info.final_url,
-            &tmp_path,
+            tmp_path,
             inspect_info.file_size,
             inspect_info.supports_range,
             4,
@@ -546,31 +613,111 @@ async fn ensure_ytdlp_bin() -> Result<String, String> {
         )
         .await
         .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
+            let _ = std::fs::remove_file(tmp_path);
             format!(
-                "Komponen yt-dlp belum terpasang dan gagal diunduh otomatis ({}). Pastikan koneksi internet aktif.",
-                e
+                "Komponen {} gagal diunduh otomatis ({}). Pastikan koneksi internet aktif.",
+                label, e
             )
         })?;
 
-    let downloaded_len = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
-    if downloaded_len < 1_000_000 {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(
-            "Berkas yt-dlp yang diunduh tidak valid atau terpotong. Coba ulangi beberapa saat lagi."
-                .to_string(),
-        );
+    let downloaded_len = std::fs::metadata(tmp_path).map(|m| m.len()).unwrap_or(0);
+    if downloaded_len < min_bytes {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(format!(
+            "Berkas {} yang diunduh tidak valid atau terpotong ({} byte).",
+            label, downloaded_len
+        ));
     }
+    Ok(())
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = std::fs::metadata(&tmp_path) {
-            let mut perms = meta.permissions();
-            perms.set_mode(0o755);
-            let _ = std::fs::set_permissions(&tmp_path, perms);
+fn ytdlp_provision_lock() -> &'static tokio::sync::Mutex<()> {
+    static PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    PROVISION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn install_ytdlp_onedir() -> Result<String, String> {
+    let spec = core_engine::video_runtime::ytdlp_onedir_spec(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+    .ok_or_else(|| "Paket onedir yt-dlp tidak tersedia untuk arsitektur ini.".to_string())?;
+
+    let bin_dir = user_bin_dir()
+        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang yt-dlp.".to_string())?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
+
+    let zip_tmp = bin_dir.join("yt-dlp-onedir.zip.download");
+    let staging_dir = bin_dir.join("yt-dlp-dir.staging");
+    let dest_dir = bin_dir.join("yt-dlp-dir");
+    let backup_dir = bin_dir.join("yt-dlp-dir.old");
+    let _ = std::fs::remove_dir_all(&staging_dir);
+
+    log::info!("Mengunduh paket yt-dlp terurai (onedir) dari {}", spec.url);
+    download_tool_file("ytdlp-onedir-bootstrap", spec.url, &zip_tmp, 5_000_000, "yt-dlp onedir")
+        .await?;
+
+    let zip_for_extract = zip_tmp.clone();
+    let staging_for_extract = staging_dir.clone();
+    let extract_res = tokio::task::spawn_blocking(move || {
+        core_engine::video_runtime::extract_zip_archive(&zip_for_extract, &staging_for_extract)
+    })
+    .await
+    .map_err(|e| format!("Gagal mengekstrak arsip yt-dlp onedir: {}", e))?;
+    let _ = std::fs::remove_file(&zip_tmp);
+    extract_res?;
+
+    let staged_bin = find_executable_in_specific_dir(spec.bin_names, &staging_dir)
+        .filter(|p| std::fs::metadata(p).map(|m| m.len() >= 1_000_000).unwrap_or(false))
+        .ok_or_else(|| {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            "Binari yt-dlp tidak ditemukan setelah ekstraksi arsip onedir.".to_string()
+        })?;
+    if !staging_dir.join("_internal").is_dir() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err("Folder _internal yt-dlp tidak ditemukan setelah ekstraksi.".to_string());
+    }
+    set_file_executable_if_unix(&staged_bin);
+
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    if dest_dir.exists() {
+        if std::fs::rename(&dest_dir, &backup_dir).is_err() {
+            let _ = std::fs::remove_dir_all(&dest_dir);
         }
     }
+    if let Err(e) = std::fs::rename(&staging_dir, &dest_dir) {
+        if backup_dir.exists() && !dest_dir.exists() {
+            let _ = std::fs::rename(&backup_dir, &dest_dir);
+        }
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(format!(
+            "Gagal menempatkan paket yt-dlp onedir ke {}: {}",
+            dest_dir.display(),
+            e
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&backup_dir);
+
+    get_ytdlp_onedir_bin()
+        .map(|p| p.display().to_string())
+        .ok_or_else(|| "Gagal memverifikasi instalasi yt-dlp onedir.".to_string())
+}
+
+async fn install_ytdlp_singlefile() -> Result<String, String> {
+    let bin_dir = user_bin_dir()
+        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang yt-dlp.".to_string())?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
+
+    let bin_name = format!("yt-dlp{}", std::env::consts::EXE_SUFFIX);
+    let dest_path = bin_dir.join(&bin_name);
+    let tmp_path = bin_dir.join(format!("{}.download", bin_name));
+
+    let url = ytdlp_download_url_for(std::env::consts::OS, std::env::consts::ARCH);
+    log::info!("Mengunduh komponen yt-dlp otomatis dari {}", url);
+    download_tool_file("ytdlp-bootstrap", url, &tmp_path, 1_000_000, "yt-dlp").await?;
+    set_file_executable_if_unix(&tmp_path);
 
     if dest_path.exists() {
         let _ = std::fs::remove_file(&dest_path);
@@ -581,6 +728,107 @@ async fn ensure_ytdlp_bin() -> Result<String, String> {
     })?;
 
     Ok(dest_path.display().to_string())
+}
+
+async fn ensure_ytdlp_bin() -> Result<String, String> {
+    if let Some(existing) = get_ytdlp_bin() {
+        return Ok(existing);
+    }
+
+    let _guard = ytdlp_provision_lock().lock().await;
+    if let Some(existing) = get_ytdlp_bin() {
+        return Ok(existing);
+    }
+
+    if core_engine::video_runtime::ytdlp_onedir_spec(std::env::consts::OS, std::env::consts::ARCH)
+        .is_some()
+    {
+        match install_ytdlp_onedir().await {
+            Ok(path) => return Ok(path),
+            Err(err) => {
+                log::warn!(
+                    "Pemasangan paket yt-dlp onedir gagal ({}), beralih ke unduhan binari tunggal.",
+                    err
+                );
+            }
+        }
+    }
+
+    install_ytdlp_singlefile().await
+}
+
+async fn upgrade_ytdlp_to_onedir_if_needed() -> Result<String, String> {
+    if let Some(existing) = get_ytdlp_onedir_bin() {
+        return Ok(existing.display().to_string());
+    }
+    if core_engine::video_runtime::ytdlp_onedir_spec(std::env::consts::OS, std::env::consts::ARCH)
+        .is_none()
+    {
+        return ensure_ytdlp_bin().await;
+    }
+
+    let _guard = ytdlp_provision_lock().lock().await;
+    if let Some(existing) = get_ytdlp_onedir_bin() {
+        return Ok(existing.display().to_string());
+    }
+    install_ytdlp_onedir().await
+}
+
+async fn ensure_js_runtime_bin() -> Result<Option<String>, String> {
+    if let Some(existing) = detect_js_runtime_arg() {
+        return Ok(Some(existing));
+    }
+
+    static QJS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _guard = QJS_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    if let Some(existing) = detect_js_runtime_arg() {
+        return Ok(Some(existing));
+    }
+
+    let Some(url) = core_engine::video_runtime::quickjs_download_url_for(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ) else {
+        return Ok(None);
+    };
+
+    let bin_dir = user_bin_dir()
+        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang QuickJS.".to_string())?;
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
+
+    let bin_name = format!("qjs{}", std::env::consts::EXE_SUFFIX);
+    let dest_path = bin_dir.join(&bin_name);
+    let tmp_path = bin_dir.join(format!("{}.download", bin_name));
+
+    log::info!("Mengunduh runtime JS ringan (QuickJS-NG) dari {}", url);
+    download_tool_file("qjs-bootstrap", url, &tmp_path, 500_000, "QuickJS").await?;
+    set_file_executable_if_unix(&tmp_path);
+
+    if dest_path.exists() {
+        let _ = std::fs::remove_file(&dest_path);
+    }
+    std::fs::rename(&tmp_path, &dest_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("Gagal menempatkan QuickJS ke {}: {}", dest_path.display(), e)
+    })?;
+
+    Ok(Some(format!("quickjs:{}", dest_path.display())))
+}
+
+async fn ensure_ytdlp_ready_for_video() -> Result<String, String> {
+    let (ytdlp_res, qjs_res) = tokio::join!(ensure_ytdlp_bin(), ensure_js_runtime_bin());
+    if let Err(err) = qjs_res {
+        log::warn!(
+            "Runtime QuickJS belum tersedia ({}), lanjut dengan klien cadangan.",
+            err
+        );
+    }
+    ytdlp_res
 }
 
 fn extract_url_host(raw_url: &str) -> String {
@@ -720,10 +968,15 @@ fn json_has_playable_video_format(json_val: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+fn video_inspect_coordinator() -> &'static core_engine::VideoInspectCoordinator {
+    static COORDINATOR: OnceLock<core_engine::VideoInspectCoordinator> = OnceLock::new();
+    COORDINATOR.get_or_init(core_engine::VideoInspectCoordinator::new)
+}
+
 async fn run_ytdlp_dump_json(
     bin: &str,
     url: &str,
-    force_all_clients: bool,
+    force_fallback_clients: bool,
     cookie: Option<&str>,
     referer: Option<&str>,
     user_agent: Option<&str>,
@@ -735,11 +988,14 @@ async fn run_ytdlp_dump_json(
     let mut cmd = tokio::process::Command::new(bin);
     hide_window_tokio(&mut cmd);
     let has_js_rt = apply_ytdlp_runtime_env(&mut cmd);
-    if force_all_clients || !has_js_rt {
-        cmd.arg("--extractor-args").arg("youtube:player_client=all");
+    if force_fallback_clients || (!has_js_rt && is_youtube_url(url)) {
+        cmd.arg("--extractor-args")
+            .arg(core_engine::video_runtime::youtube_fallback_extractor_args());
     }
     cmd.arg("--dump-single-json");
     cmd.arg("--no-playlist");
+    cmd.arg("--no-warnings");
+    cmd.arg("--no-check-formats");
     apply_ytdlp_headers(&mut cmd, cookie, referer, user_agent);
     apply_ytdlp_network_options(&mut cmd, proxy_url, auth_username, auth_password);
     cmd.arg(url);
@@ -786,10 +1042,52 @@ async fn inspect_video_url_with_options(
     auth_username: Option<&str>,
     auth_password: Option<&str>,
 ) -> Result<InspectResult, String> {
-    let bin = ensure_ytdlp_bin().await?;
-    let is_yt = is_youtube_url(url);
+    let fingerprint = core_engine::video_runtime::inspect_options_fingerprint(
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+    );
 
-    // Primary extraction (allow generous timeout for Windows PyInstaller/Defender cold start)
+    let url_owned = url.to_string();
+    let cookie_owned = cookie.map(String::from);
+    let referer_owned = referer.map(String::from);
+    let ua_owned = user_agent.map(String::from);
+    let proxy_owned = proxy_url.map(String::from);
+    let auth_user_owned = auth_username.map(String::from);
+    let auth_pass_owned = auth_password.map(String::from);
+
+    video_inspect_coordinator()
+        .get_or_inspect(url, &fingerprint, move || async move {
+            inspect_video_url_uncached(
+                &url_owned,
+                cookie_owned.as_deref(),
+                referer_owned.as_deref(),
+                ua_owned.as_deref(),
+                proxy_owned.as_deref(),
+                auth_user_owned.as_deref(),
+                auth_pass_owned.as_deref(),
+            )
+            .await
+        })
+        .await
+}
+
+async fn inspect_video_url_uncached(
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+) -> Result<InspectResult, String> {
+    let bin = ensure_ytdlp_ready_for_video().await?;
+    let is_yt = is_youtube_url(url);
+    let has_custom_headers = cookie.is_some() || user_agent.is_some();
+
     let primary = run_ytdlp_dump_json(
         &bin,
         url,
@@ -800,27 +1098,29 @@ async fn inspect_video_url_with_options(
         proxy_url,
         auth_username,
         auth_password,
-        22,
+        16,
     )
     .await;
 
     let json_val = match primary {
         Ok(v) if !is_yt || json_has_playable_video_format(&v) => v,
+        Err(c_err) if !is_yt && !has_custom_headers => {
+            return Err(c_err);
+        }
         fallback_candidate => {
             // Fallback for YouTube session/cookie bot-gate or SABR client mismatch:
-            // retry cleanly without browser Cookie header and/or with all clients enabled.
-            let retry_all = !is_yt || fallback_candidate.is_ok();
+            // retry cleanly without browser Cookie/UA headers and with fast fallback clients.
             let retry = run_ytdlp_dump_json(
                 &bin,
                 url,
-                retry_all,
-                if is_yt { None } else { cookie },
+                is_yt,
+                None,
                 referer,
-                if is_yt { None } else { user_agent },
+                None,
                 proxy_url,
                 auth_username,
                 auth_password,
-                18,
+                14,
             )
             .await;
 
@@ -1533,7 +1833,7 @@ async fn start_real_download(
             || format_id.as_deref().map_or(false, |f| !f.trim().is_empty());
 
         if is_video_or_stream {
-            let ytdlp_res = ensure_ytdlp_bin().await;
+            let ytdlp_res = ensure_ytdlp_ready_for_video().await;
             let mut ytdlp_error_detail: Option<String> = ytdlp_res.as_ref().err().cloned();
 
             if let Ok(bin) = ytdlp_res {
@@ -1587,8 +1887,9 @@ async fn start_real_download(
                 let mut cmd = tokio::process::Command::new(&bin);
                 hide_window_tokio(&mut cmd);
                 let has_js_rt = apply_ytdlp_runtime_env(&mut cmd);
-                if !has_js_rt {
-                    cmd.arg("--extractor-args").arg("youtube:player_client=all");
+                if !has_js_rt && is_youtube_url(&url) {
+                    cmd.arg("--extractor-args")
+                        .arg(core_engine::video_runtime::youtube_fallback_extractor_args());
                 }
                 cmd.arg("--no-playlist");
                 cmd.arg("--newline");
@@ -4731,13 +5032,36 @@ pub fn run() {
             std::thread::spawn(|| {
                 let _ = sync_native_messaging_hosts();
             });
-            if get_ytdlp_bin().is_none() {
-                tauri::async_runtime::spawn(async {
-                    if let Err(e) = ensure_ytdlp_bin().await {
-                        log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e);
+            tauri::async_runtime::spawn(async {
+                let ytdlp_fut = async {
+                    if core_engine::video_runtime::ytdlp_onedir_spec(
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                    )
+                    .is_some()
+                        && get_ytdlp_onedir_bin().is_none()
+                    {
+                        if let Err(e) = upgrade_ytdlp_to_onedir_if_needed().await {
+                            log::warn!("Upgrade yt-dlp onedir awal belum berhasil: {}", e);
+                            if get_ytdlp_bin().is_none() {
+                                if let Err(e2) = ensure_ytdlp_bin().await {
+                                    log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e2);
+                                }
+                            }
+                        }
+                    } else if get_ytdlp_bin().is_none() {
+                        if let Err(e) = ensure_ytdlp_bin().await {
+                            log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e);
+                        }
                     }
-                });
-            }
+                };
+                let js_fut = async {
+                    if let Err(e) = ensure_js_runtime_bin().await {
+                        log::warn!("Auto-provisioning awal runtime JS belum berhasil: {}", e);
+                    }
+                };
+                tokio::join!(ytdlp_fut, js_fut);
+            });
             tauri::async_runtime::spawn(async move {
                 start_browser_bridge_server(handle).await;
             });
@@ -4833,6 +5157,17 @@ mod tests {
             ]
         });
         assert!(json_has_playable_video_format(&with_video));
+
+        assert!(core_engine::video_runtime::ytdlp_onedir_spec("windows", "x86_64").is_some());
+        assert!(core_engine::video_runtime::ytdlp_onedir_spec("linux", "x86_64").is_some());
+        assert!(core_engine::video_runtime::ytdlp_onedir_spec("macos", "aarch64").is_none());
+        assert!(core_engine::video_runtime::quickjs_download_url_for("windows", "x86_64").is_some());
+        assert!(core_engine::video_runtime::quickjs_download_url_for("linux", "x86_64").is_some());
+        assert!(!core_engine::video_runtime::youtube_fallback_extractor_args().contains("=all"));
+        assert_eq!(
+            core_engine::video_runtime::canonicalize_video_url("https://youtu.be/WPul2u-pIog?si=abc"),
+            "youtube:v:WPul2u-pIog"
+        );
     }
 
     #[test]
@@ -5083,7 +5418,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.1");
+        assert_eq!(info.version, "1.0.2");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
