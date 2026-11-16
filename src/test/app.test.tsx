@@ -652,7 +652,7 @@ describe('Download Cepat UI Suite', () => {
     expect(screen.getAllByText('Ujang Mustamar').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Copyright © 2026 Ujang Mustamar')).toBeInTheDocument();
     expect(screen.getByText('MIT')).toBeInTheDocument();
-    expect(screen.getAllByText(/v1\.0\.0/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/v1\.0\.1/).length).toBeGreaterThanOrEqual(2);
 
     // Switch to Browser Extension tab and confirm official module branding renders cleanly
     fireEvent.click(screen.getByRole('button', { name: 'Ekstensi Browser' }));
@@ -694,5 +694,64 @@ describe('Download Cepat UI Suite', () => {
     const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
     expect(selects.some((s) => s.value === 'programs')).toBe(true);
     expect(screen.getByDisplayValue('~/Downloads/Programs')).toBeInTheDocument();
+  });
+
+  it('F18: Checks for app updates in Settings About tab, shows update banner, and invokes install', async () => {
+    const checkSpy = vi.spyOn(nativeBridge, 'checkForAppUpdate').mockResolvedValue({
+      currentVersion: '1.0.1',
+      latestVersion: '1.0.2',
+      updateAvailable: true,
+      releaseUrl: 'https://github.com/moesstudio/download-cepat/releases/tag/v1.0.2',
+      releaseNotes: 'Auto-update & bug fixes',
+      publishedAt: '2026-11-16T00:00:00Z',
+      assetName: 'Download.Cepat_1.0.2_x64-setup.exe',
+      assetUrl: 'https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_x64-setup.exe',
+      assetSize: 4730815,
+      assetSha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      installKind: 'windows_nsis',
+      inPlaceSupported: true,
+    });
+    const installSpy = vi.spyOn(nativeBridge, 'downloadAndInstallAppUpdate').mockResolvedValue({
+      startedInPlace: false,
+      message: 'Simulasi pembaruan v1.0.2 diverifikasi SHA-256.',
+      assetPath: '/tmp/Download.Cepat_1.0.2_x64-setup.exe',
+    });
+
+    try {
+      localStorage.removeItem('download_cepat_lang');
+      localStorage.removeItem('download_cepat_auto_update');
+      render(<App />);
+
+      // Open About / Update card via sidebar attribution button
+      fireEvent.click(screen.getByRole('button', { name: /Ujang Mustamar/i }));
+      expect(screen.getByText('Pembaruan Aplikasi (Auto-Update)')).toBeInTheDocument();
+
+      // Toggle auto-update preference
+      const autoCheckToggle = screen.getByLabelText('Periksa pembaruan otomatis saat aplikasi dibuka') as HTMLInputElement;
+      expect(autoCheckToggle.checked).toBe(true);
+      fireEvent.click(autoCheckToggle);
+      expect(localStorage.getItem('download_cepat_auto_update')).toBe('false');
+
+      // Check for update and assert banner + install button
+      fireEvent.click(screen.getByRole('button', { name: /Cek Pembaruan Sekarang/i }));
+      await waitFor(() => {
+        expect(checkSpy).toHaveBeenCalledTimes(1);
+        expect(screen.getByText('Pembaruan v1.0.2 Tersedia')).toBeInTheDocument();
+        expect(screen.getByRole('region', { name: 'Pembaruan Aplikasi (Auto-Update)' })).toBeInTheDocument();
+      });
+
+      const updateButtons = screen.getAllByRole('button', { name: /Update Sekarang/i });
+      expect(updateButtons.length).toBeGreaterThanOrEqual(1);
+      fireEvent.click(updateButtons[0]);
+
+      await waitFor(() => {
+        expect(installSpy).toHaveBeenCalledTimes(1);
+        expect(screen.getAllByText(/Simulasi pembaruan v1\.0\.2/).length).toBeGreaterThan(0);
+      });
+    } finally {
+      checkSpy.mockRestore();
+      installSpy.mockRestore();
+      localStorage.removeItem('download_cepat_auto_update');
+    }
   });
 });

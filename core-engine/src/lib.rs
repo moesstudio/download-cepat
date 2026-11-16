@@ -5,6 +5,7 @@ pub mod inspector;
 pub mod integrity;
 pub mod model;
 pub mod storage;
+pub mod updater;
 
 pub use downloader::{DownloadController, DownloadOptions, Downloader};
 pub use inspector::{InspectOptions, UrlInspector};
@@ -13,3 +14,4 @@ pub use model::{
     ProgressTelemetry, SegmentProgress, TaskStatus, VideoFormat,
 };
 pub use storage::Storage;
+pub use updater::{AppUpdateInfo, PlatformEnvironment, UpdateInstallKind};

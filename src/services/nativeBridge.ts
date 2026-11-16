@@ -1,10 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
+  AppUpdateInfo,
   BuildInfo,
   FileChecksums,
   GrabbedAsset,
   InspectResult,
   PostDownloadAction,
+  UpdateInstallResult,
 } from '../types.ts';
 
 // Check if running inside Tauri native desktop environment
@@ -414,9 +416,11 @@ export const runPostDownloadAction = async (action: PostDownloadAction): Promise
   return action;
 };
 
+export const OFFICIAL_RELEASES_URL = 'https://github.com/moesstudio/download-cepat/releases';
+
 export const FALLBACK_BUILD_INFO: BuildInfo = {
   appName: 'Download Cepat',
-  version: '1.0.0',
+  version: '1.0.1',
   author: 'Ujang Mustamar',
   publisher: 'Ujang Mustamar',
   copyright: 'Copyright © 2026 Ujang Mustamar',
@@ -438,6 +442,37 @@ export const getBuildInfo = async (): Promise<BuildInfo> => {
     }
   }
   return FALLBACK_BUILD_INFO;
+};
+
+export const checkForAppUpdate = async (): Promise<AppUpdateInfo> => {
+  if (isTauri()) {
+    return await invoke<AppUpdateInfo>('check_for_app_update');
+  }
+  return {
+    currentVersion: FALLBACK_BUILD_INFO.version,
+    latestVersion: FALLBACK_BUILD_INFO.version,
+    updateAvailable: false,
+    releaseUrl: OFFICIAL_RELEASES_URL,
+    releaseNotes: '',
+    publishedAt: null,
+    assetName: null,
+    assetUrl: null,
+    assetSize: null,
+    assetSha256: null,
+    installKind: 'manual',
+    inPlaceSupported: false,
+  };
+};
+
+export const downloadAndInstallAppUpdate = async (): Promise<UpdateInstallResult> => {
+  if (isTauri()) {
+    return await invoke<UpdateInstallResult>('download_and_install_app_update');
+  }
+  return {
+    startedInPlace: false,
+    message: 'Auto-update tersedia pada aplikasi desktop Download Cepat.',
+    assetPath: null,
+  };
 };
 
 export const setTrayLanguage = async (lang: string): Promise<void> => {

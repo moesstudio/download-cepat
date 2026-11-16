@@ -18,8 +18,13 @@ import {
   Languages,
   BadgeCheck,
   ExternalLink,
+  RefreshCw,
+  DownloadCloud,
+  AlertTriangle,
 } from 'lucide-react';
 import {
+  AppUpdateInfo,
+  AppUpdateProgress,
   BuildInfo,
   CategoryRule,
   ClipboardMonitorConfig,
@@ -66,6 +71,15 @@ interface SpeedLimiterModalProps {
   categoryRules?: CategoryRule[];
   clipboardConfig?: ClipboardMonitorConfig;
   buildInfo?: BuildInfo;
+  autoUpdateEnabled?: boolean;
+  onToggleAutoUpdate?: (enabled: boolean) => void;
+  updateInfo?: AppUpdateInfo | null;
+  updateChecking?: boolean;
+  updateInstalling?: boolean;
+  updateProgress?: AppUpdateProgress | null;
+  updateError?: string | null;
+  onCheckForUpdate?: () => void;
+  onInstallUpdate?: () => void;
   onChangeLanguage?: (next: LanguageCode) => void;
   onSaveSpeedLimit?: (limitKbs: number) => void;
   onSaveSettings?: (settings: {
@@ -91,6 +105,15 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
   categoryRules: propRules = DEFAULT_CATEGORY_RULES,
   clipboardConfig: propClipboard = DEFAULT_CLIPBOARD_CONFIG,
   buildInfo,
+  autoUpdateEnabled = true,
+  onToggleAutoUpdate,
+  updateInfo = null,
+  updateChecking = false,
+  updateInstalling = false,
+  updateProgress = null,
+  updateError = null,
+  onCheckForUpdate,
+  onInstallUpdate,
   onChangeLanguage,
   onSaveSpeedLimit,
   onSaveSettings,
@@ -856,9 +879,134 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
             </div>
           )}
 
-          {/* TAB 7: Official Build Info */}
+          {/* TAB 7: Official Build Info & Auto-Update */}
           {activeTab === 'about' && (
             <div className="space-y-4">
+              {/* Auto-Update Card */}
+              <div className="p-4 bg-surface rounded-lg border border-border space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start space-x-2.5">
+                    <DownloadCloud className="w-5 h-5 text-accent shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-bold text-text">{t('update.sectionTitle')}</h3>
+                      <p className="text-[11px] text-text-muted leading-relaxed">
+                        {t('update.sectionDesc')}
+                      </p>
+                    </div>
+                  </div>
+                  {updateInfo?.updateAvailable ? (
+                    <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-mono text-[10px] font-bold shrink-0">
+                      {t('update.availableBadge', { version: updateInfo.latestVersion })}
+                    </span>
+                  ) : null}
+                </div>
+
+                <label className="flex items-center justify-between gap-3 p-2.5 rounded-md bg-bg border border-border cursor-pointer">
+                  <span className="text-[11px] font-medium text-text">
+                    {t('update.autoCheckLabel')}
+                  </span>
+                  <input
+                    type="checkbox"
+                    aria-label={t('update.autoCheckLabel')}
+                    checked={autoUpdateEnabled}
+                    onChange={(e) => onToggleAutoUpdate?.(e.target.checked)}
+                    className="rounded border-border text-accent focus:ring-accent"
+                  />
+                </label>
+
+                {updateInstalling && updateProgress && (
+                  <div className="p-2.5 rounded-md bg-accent/10 border border-accent/25 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] font-medium text-text">
+                      <span>{updateProgress.message}</span>
+                      <span className="font-mono text-accent">
+                        {Math.round(updateProgress.progressPercent)}%
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 bg-bg rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-accent transition-all duration-150"
+                        style={{ width: `${Math.min(100, Math.max(4, updateProgress.progressPercent))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {updateError && (
+                  <div className="flex items-start space-x-2 p-2.5 rounded-md bg-danger/10 border border-danger/30 text-danger text-[11px]">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{updateError}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                  <div className="text-[11px] text-text-muted">
+                    {updateInfo ? (
+                      updateInfo.updateAvailable ? (
+                        <span className="text-emerald-400 font-semibold">
+                          {t('update.bannerTitle', { version: updateInfo.latestVersion })}
+                          {updateInfo.assetName ? ` • ${updateInfo.assetName}` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-success font-medium">
+                          {t('update.upToDate', { version: updateInfo.currentVersion })}
+                        </span>
+                      )
+                    ) : (
+                      <span>{t('update.lastCheckedNone')}</span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      disabled={updateChecking || updateInstalling}
+                      onClick={() => onCheckForUpdate?.()}
+                      className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md bg-bg border border-border hover:bg-surface-hover text-text font-semibold text-xs disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-accent ${updateChecking ? 'animate-spin' : ''}`} />
+                      <span>
+                        {updateChecking ? t('update.checkingBtn') : t('update.checkNowBtn')}
+                      </span>
+                    </button>
+
+                    {updateInfo?.updateAvailable && (
+                      updateInfo.inPlaceSupported && updateInfo.assetSha256 ? (
+                        <button
+                          type="button"
+                          disabled={updateInstalling}
+                          onClick={() => onInstallUpdate?.()}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md bg-accent text-on-accent hover:bg-accent-hover font-bold text-xs disabled:opacity-50 cursor-pointer shadow-sm"
+                        >
+                          <DownloadCloud className="w-3.5 h-3.5" />
+                          <span>
+                            {updateInstalling
+                              ? t('update.updatingBtn', {
+                                  pct: Math.round(updateProgress?.progressPercent ?? 0),
+                                })
+                              : t('update.installNowBtn')}
+                          </span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => openExternalUrl(updateInfo.releaseUrl)}
+                          className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md bg-accent text-on-accent hover:bg-accent-hover font-bold text-xs cursor-pointer shadow-sm"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          <span>{t('update.openReleaseBtn')}</span>
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+
+                {updateInfo?.updateAvailable && updateInfo.releaseNotes && (
+                  <pre className="p-2.5 rounded-md bg-bg border border-border text-[11px] text-text-muted whitespace-pre-wrap font-sans max-h-28 overflow-y-auto">
+                    {updateInfo.releaseNotes}
+                  </pre>
+                )}
+              </div>
+
               <div className="p-4 bg-surface rounded-lg border border-border space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-center space-x-2.5">

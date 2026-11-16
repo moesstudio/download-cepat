@@ -174,3 +174,32 @@ export interface BuildInfo {
   buildProfile: string;
   tauriVersion: string;
 }
+
+export interface AppUpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  releaseUrl: string;
+  releaseNotes: string;
+  publishedAt?: string | null;
+  assetName?: string | null;
+  assetUrl?: string | null;
+  assetSize?: number | null;
+  assetSha256?: string | null;
+  installKind: string;
+  inPlaceSupported: boolean;
+}
+
+export interface AppUpdateProgress {
+  stage: 'checking' | 'downloading' | 'verifying' | 'installing' | 'manual' | string;
+  downloadedBytes: number;
+  totalBytes?: number | null;
+  progressPercent: number;
+  message: string;
+}
+
+export interface UpdateInstallResult {
+  startedInPlace: boolean;
+  message: string;
+  assetPath?: string | null;
+}

@@ -3468,6 +3468,584 @@ fn open_external_url(url: String) -> Result<String, String> {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallResult {
+    pub started_in_place: bool,
+    pub message: String,
+    pub asset_path: Option<String>,
+}
+
+fn macos_app_bundle_for_exe(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    let app_dir = contents_dir.parent()?;
+    if macos_dir.file_name().and_then(|s| s.to_str()) == Some("MacOS")
+        && contents_dir.file_name().and_then(|s| s.to_str()) == Some("Contents")
+        && app_dir.extension().and_then(|s| s.to_str()) == Some("app")
+    {
+        Some(app_dir.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn current_platform_env() -> core_engine::PlatformEnvironment {
+    let inside_macos = std::env::current_exe()
+        .ok()
+        .and_then(|p| macos_app_bundle_for_exe(&p))
+        .is_some();
+    core_engine::PlatformEnvironment::detect_current(inside_macos)
+}
+
+fn emit_update_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    progress_percent: f64,
+    message: &str,
+) {
+    let _ = app.emit(
+        "app-update-progress",
+        serde_json::json!({
+            "stage": stage,
+            "downloadedBytes": downloaded_bytes,
+            "totalBytes": total_bytes,
+            "progressPercent": progress_percent,
+            "message": message,
+        }),
+    );
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_cmd_path(path: &Path) -> Result<String, String> {
+    let raw = path.to_string_lossy().replace('/', "\\");
+    if raw.is_empty()
+        || raw.contains('"')
+        || raw.contains('%')
+        || raw.contains('\r')
+        || raw.contains('\n')
+        || raw.contains('&')
+        || raw.contains('|')
+        || raw.contains('<')
+        || raw.contains('>')
+        || raw.contains('^')
+    {
+        return Err(format!(
+            "Jalur instalasi mengandung karakter tidak aman untuk skrip pembaruan: {}",
+            raw
+        ));
+    }
+    Ok(raw)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_update_cmd(
+    installer_path: &Path,
+    exe_path: &Path,
+    is_msi: bool,
+) -> Result<String, String> {
+    let installer = validate_windows_cmd_path(installer_path)?;
+    let exe = validate_windows_cmd_path(exe_path)?;
+    let install_line = if is_msi {
+        format!("start /wait \"\" msiexec /i \"{}\" /passive /norestart", installer)
+    } else {
+        format!("start /wait \"\" \"{}\" /S", installer)
+    };
+    Ok(format!(
+        "@echo off\r\nsetlocal\r\nping -n 4 127.0.0.1 > nul\r\n{}\r\nif exist \"{}\" (\r\n  start \"\" \"{}\"\r\n) else if exist \"%LOCALAPPDATA%\\Download Cepat\\Download Cepat.exe\" (\r\n  start \"\" \"%LOCALAPPDATA%\\Download Cepat\\Download Cepat.exe\"\r\n) else if exist \"%LOCALAPPDATA%\\Download Cepat\\download-cepat-app.exe\" (\r\n  start \"\" \"%LOCALAPPDATA%\\Download Cepat\\download-cepat-app.exe\"\r\n)\r\ndel /f /q \"{}\" > nul 2>&1\r\ndel /f /q \"%~f0\" > nul 2>&1\r\n",
+        install_line, exe, exe, installer
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn directory_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".dc_write_probe_{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(f) => {
+            drop(f);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_extracted_app_bundle(root: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut subdirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.extension().and_then(|e| e.to_str()) == Some("app")
+                && path.join("Contents").join("MacOS").is_dir()
+            {
+                return Some(path);
+            }
+            subdirs.push(path);
+        }
+    }
+    for sub in subdirs {
+        if let Ok(nested) = std::fs::read_dir(sub) {
+            for entry in nested.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.extension().and_then(|e| e.to_str()) == Some("app")
+                    && path.join("Contents").join("MacOS").is_dir()
+                {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn check_for_app_update() -> Result<core_engine::AppUpdateInfo, String> {
+    let env = current_platform_env();
+    core_engine::updater::check_github_release(env!("CARGO_PKG_VERSION"), &env).await
+}
+
+fn schedule_app_exit_for_update(app: &tauri::AppHandle) {
+    let exit_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let count = stop_all_real_downloads();
+        if count > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        }
+        exit_handle.exit(0);
+    });
+}
+
+#[tauri::command]
+async fn download_and_install_app_update(app: tauri::AppHandle) -> Result<UpdateInstallResult, String> {
+    emit_update_progress(
+        &app,
+        "checking",
+        0,
+        None,
+        0.0,
+        "Memverifikasi rilis terbaru dari GitHub...",
+    );
+
+    let env = current_platform_env();
+    let info = core_engine::updater::check_github_release(env!("CARGO_PKG_VERSION"), &env).await?;
+    if !info.update_available {
+        return Err(format!(
+            "Download Cepat v{} sudah merupakan versi terbaru.",
+            info.current_version
+        ));
+    }
+
+    let asset_name = info
+        .asset_name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            "Paket pembaruan otomatis untuk platform Anda belum tersedia pada rilis ini. Silakan unduh langsung dari halaman rilis GitHub."
+                .to_string()
+        })?;
+    let asset_url = info
+        .asset_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "URL paket pembaruan tidak tersedia.".to_string())?;
+    let expected_sha = info
+        .asset_sha256
+        .clone()
+        .ok_or_else(|| {
+            "Digest SHA-256 tidak tersedia pada aset rilis GitHub sehingga pemasangan otomatis dibatalkan demi keamanan."
+                .to_string()
+        })?;
+
+    let safe_name = Path::new(&asset_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download-cepat-update.bin".to_string());
+
+    let update_dir = std::env::temp_dir().join("download-cepat-updates");
+    let dest_path = normalize_platform_path(update_dir.join(&safe_name));
+    let known_total = info.asset_size;
+
+    let app_for_progress = app.clone();
+    let mut last_emit = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut last_pct = -1.0f64;
+
+    core_engine::updater::download_verified_asset(
+        &asset_url,
+        &dest_path,
+        &expected_sha,
+        &info.current_version,
+        true,
+        |downloaded, resp_total| {
+            let total = resp_total.or(known_total);
+            let pct = match total {
+                Some(t) if t > 0 => ((downloaded as f64 / t as f64) * 100.0).min(100.0),
+                _ => 0.0,
+            };
+            let now = std::time::Instant::now();
+            let done = total.map_or(false, |t| downloaded >= t);
+            if done || now.duration_since(last_emit) >= std::time::Duration::from_millis(120) || (pct - last_pct).abs() >= 1.0 {
+                last_emit = now;
+                last_pct = pct;
+                emit_update_progress(
+                    &app_for_progress,
+                    "downloading",
+                    downloaded,
+                    total,
+                    pct,
+                    "Mengunduh paket pembaruan resmi...",
+                );
+            }
+        },
+    )
+    .await?;
+
+    emit_update_progress(
+        &app,
+        "installing",
+        dest_path.metadata().map(|m| m.len()).unwrap_or(0),
+        known_total,
+        100.0,
+        "Checksum SHA-256 terverifikasi. Memasang pembaruan...",
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Gagal mendeteksi executable Download Cepat: {}", e))?;
+        let is_msi = info.install_kind == "windows_msi";
+        let script_content = build_windows_update_cmd(&dest_path, &exe_path, is_msi)?;
+        let script_path = update_dir.join("dc_apply_update.cmd");
+        std::fs::write(&script_path, script_content)
+            .map_err(|e| format!("Gagal membuat skrip pembaruan Windows: {}", e))?;
+
+        std::process::Command::new("cmd")
+            .args(["/C", &script_path.to_string_lossy().into_owned()])
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Gagal menjalankan installer pembaruan: {}", e))?;
+
+        schedule_app_exit_for_update(&app);
+        return Ok(UpdateInstallResult {
+            started_in_place: true,
+            message: format!(
+                "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. Aplikasi akan menutup sebentar untuk memasang pembaruan dan dibuka kembali otomatis.",
+                info.latest_version
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if info.install_kind == "macos_app_tarball" {
+            if let Some(target_app) = std::env::current_exe()
+                .ok()
+                .and_then(|p| macos_app_bundle_for_exe(&p))
+            {
+                let extract_dir = update_dir.join("extracted");
+                let _ = std::fs::remove_dir_all(&extract_dir);
+                std::fs::create_dir_all(&extract_dir)
+                    .map_err(|e| format!("Gagal membuat folder ekstraksi pembaruan: {}", e))?;
+
+                let tar_status = tokio::process::Command::new("/usr/bin/tar")
+                    .arg("-xzf")
+                    .arg(&dest_path)
+                    .arg("-C")
+                    .arg(&extract_dir)
+                    .status()
+                    .await
+                    .map_err(|e| format!("Gagal mengekstrak arsip pembaruan macOS: {}", e))?;
+                if !tar_status.success() {
+                    return Err("Ekstraksi paket pembaruan macOS gagal.".to_string());
+                }
+
+                let new_app = find_extracted_app_bundle(&extract_dir).ok_or_else(|| {
+                    "Berkas .app baru tidak ditemukan di dalam arsip pembaruan.".to_string()
+                })?;
+
+                let _ = std::process::Command::new("/usr/bin/xattr")
+                    .args(["-dr", "com.apple.quarantine"])
+                    .arg(&new_app)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+
+                let writable = target_app
+                    .parent()
+                    .map(directory_is_writable)
+                    .unwrap_or(false);
+                if writable {
+                    let pid_str = std::process::id().to_string();
+                    let script = r#"
+OLD_PID="$1"
+NEW_APP="$2"
+TARGET_APP="$3"
+TAR_FILE="$4"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+rm -rf "${TARGET_APP}.backup"
+if [ -e "$TARGET_APP" ]; then
+  mv "$TARGET_APP" "${TARGET_APP}.backup" || exit 1
+fi
+if mv "$NEW_APP" "$TARGET_APP"; then
+  rm -rf "${TARGET_APP}.backup"
+else
+  mv "${TARGET_APP}.backup" "$TARGET_APP" 2>/dev/null
+  exit 1
+fi
+rm -f "$TAR_FILE"
+/usr/bin/xattr -dr com.apple.quarantine "$TARGET_APP" 2>/dev/null || true
+/usr/bin/open -n "$TARGET_APP"
+"#;
+                    std::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(script)
+                        .arg("dc-macos-updater")
+                        .arg(&pid_str)
+                        .arg(&new_app)
+                        .arg(&target_app)
+                        .arg(&dest_path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map_err(|e| format!("Gagal meluncurkan skrip pembaruan macOS: {}", e))?;
+
+                    schedule_app_exit_for_update(&app);
+                    return Ok(UpdateInstallResult {
+                        started_in_place: true,
+                        message: format!(
+                            "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. Download Cepat akan memuat ulang otomatis.",
+                            info.latest_version
+                        ),
+                        asset_path: Some(dest_path.display().to_string()),
+                    });
+                }
+            }
+        }
+
+        let _ = open::that(&dest_path);
+        return Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Installer v{} ({}) telah diverifikasi SHA-256 dan dibuka. Seret aplikasi ke folder Applications untuk menyelesaikan pembaruan.",
+                info.latest_version, safe_name
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if info.install_kind == "linux_appimage" {
+            let _ = std::fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(0o755));
+            if let Some(current_appimage) = std::env::var_os("APPIMAGE")
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+            {
+                if let Some(app_dir) = current_appimage.parent() {
+                    if directory_is_writable(app_dir) {
+                        let staged_path = app_dir.join(format!(
+                            ".{}.update.tmp",
+                            current_appimage
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Download-Cepat.AppImage")
+                        ));
+                        let _ = std::fs::remove_file(&staged_path);
+                        let moved_staged = if std::fs::rename(&dest_path, &staged_path).is_ok() {
+                            true
+                        } else if std::fs::copy(&dest_path, &staged_path).is_ok() {
+                            let _ = std::fs::remove_file(&dest_path);
+                            true
+                        } else {
+                            false
+                        };
+                        if moved_staged {
+                            let _ = std::fs::set_permissions(
+                                &staged_path,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
+                            let pid_str = std::process::id().to_string();
+                            let script = r#"
+OLD_PID="$1"
+STAGED="$2"
+TARGET="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+mv -f "$STAGED" "$TARGET" || exit 1
+chmod +x "$TARGET"
+unset APPIMAGE APPDIR ARGV0 OWD LD_LIBRARY_PATH GDK_PIXBUF_MODULE_FILE GST_PLUGIN_SYSTEM_PATH
+nohup "$TARGET" >/dev/null 2>&1 &
+"#;
+                            std::process::Command::new("/bin/sh")
+                                .arg("-c")
+                                .arg(script)
+                                .arg("dc-appimage-updater")
+                                .arg(&pid_str)
+                                .arg(&staged_path)
+                                .arg(&current_appimage)
+                                .env_remove("APPIMAGE")
+                                .env_remove("APPDIR")
+                                .env_remove("ARGV0")
+                                .env_remove("OWD")
+                                .env_remove("LD_LIBRARY_PATH")
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .map_err(|e| format!("Gagal menjalankan pembaruan AppImage: {}", e))?;
+
+                            schedule_app_exit_for_update(&app);
+                            return Ok(UpdateInstallResult {
+                                started_in_place: true,
+                                message: format!(
+                                    "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. AppImage akan diperbarui dan dijalankan ulang otomatis.",
+                                    info.latest_version
+                                ),
+                                asset_path: Some(current_appimage.display().to_string()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let downloads_dest = resolve_path("~/Downloads").join(&safe_name);
+            let final_path = if std::fs::copy(&dest_path, &downloads_dest).is_ok() {
+                let _ = std::fs::remove_file(&dest_path);
+                let _ = std::fs::set_permissions(&downloads_dest, std::fs::Permissions::from_mode(0o755));
+                downloads_dest
+            } else {
+                dest_path
+            };
+            if let Some(parent) = final_path.parent() {
+                let _ = open::that(parent);
+            }
+            return Ok(UpdateInstallResult {
+                started_in_place: false,
+                message: format!(
+                    "AppImage v{} terverifikasi SHA-256 dan disimpan ke {} (siap dijalankan langsung).",
+                    info.latest_version,
+                    final_path.display()
+                ),
+                asset_path: Some(final_path.display().to_string()),
+            });
+        }
+
+        if info.install_kind == "linux_deb" || info.install_kind == "linux_rpm" {
+            let pkexec_available = find_executable_in_dirs(&["pkexec"], &[PathBuf::from("/usr/bin")]).is_some();
+            if pkexec_available {
+                let exe_path = std::env::current_exe()
+                    .map_err(|e| format!("Gagal mendeteksi executable Download Cepat: {}", e))?;
+                let pid_str = std::process::id().to_string();
+                let script = if info.install_kind == "linux_deb" {
+                    r#"
+OLD_PID="$1"
+PKG="$2"
+EXE="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+pkexec /bin/sh -c 'dpkg -i "$1" || apt-get install -f -y' _ "$PKG"
+STATUS=$?
+rm -f "$PKG"
+if [ $STATUS -eq 0 ] && [ -x "$EXE" ]; then
+  nohup "$EXE" >/dev/null 2>&1 &
+fi
+"#
+                } else {
+                    r#"
+OLD_PID="$1"
+PKG="$2"
+EXE="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+pkexec /bin/sh -c 'if command -v dnf >/dev/null 2>&1; then dnf install -y "$1"; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install -y "$1"; else rpm -Uvh "$1"; fi' _ "$PKG"
+STATUS=$?
+rm -f "$PKG"
+if [ $STATUS -eq 0 ] && [ -x "$EXE" ]; then
+  nohup "$EXE" >/dev/null 2>&1 &
+fi
+"#
+                };
+                std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(script)
+                    .arg("dc-linux-pkg-updater")
+                    .arg(&pid_str)
+                    .arg(&dest_path)
+                    .arg(&exe_path)
+                    .env_remove("APPIMAGE")
+                    .env_remove("APPDIR")
+                    .env_remove("ARGV0")
+                    .env_remove("OWD")
+                    .env_remove("LD_LIBRARY_PATH")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("Gagal menjalankan pemasang paket Linux: {}", e))?;
+
+                schedule_app_exit_for_update(&app);
+                return Ok(UpdateInstallResult {
+                    started_in_place: true,
+                    message: format!(
+                        "Paket v{} terverifikasi SHA-256. Konfirmasi kata sandi sistem bila diminta untuk memasang pembaruan otomatis.",
+                        info.latest_version
+                    ),
+                    asset_path: Some(dest_path.display().to_string()),
+                });
+            }
+        }
+
+        let _ = open::that(&dest_path);
+        return Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Paket pembaruan v{} telah diunduh dan diverifikasi SHA-256 di {}.",
+                info.latest_version,
+                dest_path.display()
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = open::that(&dest_path);
+        Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Paket pembaruan v{} diunduh & diverifikasi SHA-256 di {}.",
+                info.latest_version,
+                dest_path.display()
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        })
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
@@ -4062,7 +4640,9 @@ pub fn run() {
             open_extension_folder,
             open_external_url,
             get_build_info,
-            set_tray_language
+            set_tray_language,
+            check_for_app_update,
+            download_and_install_app_update
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -4503,7 +5083,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.version, "1.0.1");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
@@ -4517,5 +5097,41 @@ mod tests {
 
         let id = tray_labels_for_lang("id");
         assert_eq!(id.quit, "Keluar");
+    }
+
+    #[test]
+    fn test_auto_updater_platform_and_script_helpers() {
+        assert_eq!(
+            macos_app_bundle_for_exe(Path::new("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app")),
+            Some(PathBuf::from("/Applications/Download Cepat.app"))
+        );
+        assert_eq!(
+            macos_app_bundle_for_exe(Path::new("/usr/local/bin/download-cepat-app")),
+            None
+        );
+
+        let nsis_cmd = build_windows_update_cmd(
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64-setup.exe"),
+            Path::new(r"C:\Users\Alice\AppData\Local\Download Cepat\Download Cepat.exe"),
+            false,
+        )
+        .expect("valid NSIS script");
+        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64-setup.exe\" /S"));
+        assert!(nsis_cmd.contains("start \"\" \"C:\\Users\\Alice\\AppData\\Local\\Download Cepat\\Download Cepat.exe\""));
+
+        let msi_cmd = build_windows_update_cmd(
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64.msi"),
+            Path::new(r"C:\Program Files\Download Cepat\Download Cepat.exe"),
+            true,
+        )
+        .expect("valid MSI script");
+        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64.msi\" /passive /norestart"));
+
+        // Injection / unsafe batch chars must be rejected
+        assert!(build_windows_update_cmd(
+            Path::new(r"C:\Temp\evil&calc.exe"),
+            Path::new(r"C:\App\dc.exe"),
+            false
+        ).is_err());
     }
 }
