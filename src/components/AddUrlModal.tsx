@@ -192,7 +192,7 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         if (['zip', 'rar', '7z', 'iso', 'tar', 'gz', 'bz2', 'xz'].includes(ext || '')) cat = 'compressed';
         else if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext || '')) cat = 'video';
         else if (['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg'].includes(ext || '')) cat = 'music';
-        else if (['exe', 'dmg', 'pkg', 'msi', 'deb', 'rpm', 'apk'].includes(ext || '')) cat = 'programs';
+        else if (['exe', 'dmg', 'pkg', 'msi', 'deb', 'rpm', 'appimage', 'apk'].includes(ext || '')) cat = 'programs';
         else if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'epub'].includes(ext || '')) cat = 'documents';
       }
 
@@ -354,18 +354,18 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
     if (!fmt) return;
 
     // Update extension in filename
-    const nameWithoutExt = fileName.substring(0, fileName.lastIndexOf('.')) || fileName;
+    const dotIdx = fileName.lastIndexOf('.');
+    const nameWithoutExt = dotIdx > 0 ? fileName.slice(0, dotIdx) : fileName;
     const newName = `${nameWithoutExt}.${fmt.extension}`;
     setFileName(newName);
 
-    // Update category & destination folder
-    if (fmt.isAudioOnly) {
-      setSelectedCategory('music');
-      setSaveDir('~/Downloads/Music');
-    } else {
-      setSelectedCategory('video');
-      setSaveDir('~/Downloads/Video');
-    }
+    // Update category & destination folder respecting user categoryRules
+    const nextCategoryId = fmt.isAudioOnly ? 'music' : 'video';
+    setSelectedCategory(nextCategoryId);
+    const matchedRule = categoryRules.find((r) => r.id === nextCategoryId);
+    const foundCat = categories.find((c) => c.id === nextCategoryId);
+    const fallbackDir = nextCategoryId === 'music' ? '~/Downloads/Music' : '~/Downloads/Video';
+    setSaveDir(matchedRule?.saveDir || foundCat?.saveDir || fallbackDir);
   };
 
   const getCategoryLabel = (cat: Category) => {

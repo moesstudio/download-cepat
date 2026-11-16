@@ -66,7 +66,57 @@ pub fn available_disk_space(path: &Path) -> Option<u64> {
     Some((stat.f_bavail as u64).saturating_mul(frsize))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn available_disk_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            lpDirectoryName: *const u16,
+            lpFreeBytesAvailableToCaller: *mut u64,
+            lpTotalNumberOfBytes: *mut u64,
+            lpTotalNumberOfFreeBytes: *mut u64,
+        ) -> i32;
+    }
+
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() || probe.as_os_str().is_empty() {
+            probe = std::env::current_dir().ok()?;
+            break;
+        }
+    }
+    if probe.is_file() {
+        if !probe.pop() || probe.as_os_str().is_empty() {
+            probe = std::env::current_dir().ok()?;
+        }
+    } else if probe.as_os_str().is_empty() {
+        probe = std::env::current_dir().ok()?;
+    }
+
+    let wide: Vec<u16> = probe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_to_caller: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_to_caller,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        Some(free_to_caller)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn available_disk_space(_path: &Path) -> Option<u64> {
     None
 }

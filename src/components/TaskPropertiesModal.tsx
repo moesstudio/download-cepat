@@ -14,7 +14,7 @@ import {
   renameOrMoveDownload,
   verifyFileChecksum,
 } from '../services/nativeBridge.ts';
-import { formatDiskBytes, getParentDir } from '../utils/downloadUtils.ts';
+import { formatDiskBytes, getParentDir, joinDestinationPath } from '../utils/downloadUtils.ts';
 import { useI18n } from '../i18n/index.tsx';
 
 interface TaskPropertiesModalProps {
@@ -106,9 +106,9 @@ export const TaskPropertiesModal: React.FC<TaskPropertiesModalProps> = ({
 
   const handleRenameMove = async () => {
     const cleanName = newFileName.trim();
-    const cleanDir = newDir.trim().replace(/\/$/, '');
+    const cleanDir = newDir.trim();
     if (!cleanName || !cleanDir) return;
-    const targetPath = `${cleanDir}/${cleanName}`;
+    const targetPath = joinDestinationPath(cleanDir, cleanName);
     setIsMoving(true);
     try {
       const resolved = await renameOrMoveDownload(task.destinationPath, targetPath);

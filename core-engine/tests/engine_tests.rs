@@ -1233,3 +1233,34 @@ async fn test_checksums_disk_space_ftp_and_grabber() {
     assert!(grabbed.iter().any(|g| g.file_name == "clip.mp4"));
     web_handle.abort();
 }
+
+#[test]
+fn test_sanitize_filename_windows_and_linux_safety() {
+    use core_engine::inspector::sanitize_filename;
+
+    assert_eq!(sanitize_filename("report:final/2026?.pdf"), "report_final_2026_.pdf");
+    assert_eq!(sanitize_filename("CON.txt"), "_CON.txt");
+    assert_eq!(sanitize_filename("nul"), "_nul");
+    assert_eq!(sanitize_filename("com1.log"), "_com1.log");
+    assert_eq!(sanitize_filename("LPT9.tar.gz"), "_LPT9.tar.gz");
+    assert_eq!(sanitize_filename("normal-con.txt"), "normal-con.txt");
+    assert_eq!(sanitize_filename("trailing.dots..  "), "trailing.dots");
+    assert_eq!(sanitize_filename("..."), "download.bin");
+    assert_eq!(sanitize_filename(".."), "download.bin");
+    assert_eq!(sanitize_filename("bad\0name\nline.bin"), "bad_name_line.bin");
+    assert_eq!(sanitize_filename("   "), "download.bin");
+}
+
+#[test]
+fn test_available_disk_space_probes() {
+    use core_engine::integrity::available_disk_space;
+
+    let temp_dir = std::env::temp_dir();
+    let existing_space = available_disk_space(&temp_dir);
+    assert!(existing_space.unwrap_or(0) > 0);
+
+    let non_existent_nested = temp_dir.join("dc_nonexistent_subdir_12345").join("nested").join("file.iso");
+    let nested_space = available_disk_space(&non_existent_nested);
+    assert!(nested_space.unwrap_or(0) > 0);
+}
+

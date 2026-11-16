@@ -14,7 +14,7 @@ use crate::downloader::{
     checkpoint_path_for, save_checkpoint, BandwidthLimiter, DownloadCheckpoint, DownloadController,
     DownloadOptions,
 };
-use crate::inspector::categorize_filename;
+use crate::inspector::{categorize_filename, sanitize_filename};
 use crate::integrity::ensure_sufficient_disk_space;
 use crate::model::{InspectResult, ProgressTelemetry, SegmentProgress, TaskStatus};
 
@@ -211,12 +211,12 @@ pub async fn inspect_ftp(
 
     let _ = send_ftp_cmd(&mut reader, &mut writer, "QUIT").await;
 
-    let file_name = Path::new(&remote_path)
+    let raw_name = Path::new(&remote_path)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("ftp_download.bin")
-        .to_string();
+        .unwrap_or("ftp_download.bin");
+    let file_name = sanitize_filename(raw_name);
 
     let suggested_category = categorize_filename(&file_name);
 

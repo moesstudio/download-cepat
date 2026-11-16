@@ -121,6 +121,9 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
   // Browser extension state
   const [connectorLoading, setConnectorLoading] = useState(false);
   const [connectorMsg, setConnectorMsg] = useState('');
+  const [connectorOk, setConnectorOk] = useState<boolean | null>(null);
+  const [folderMsg, setFolderMsg] = useState('');
+  const [folderOk, setFolderOk] = useState<boolean | null>(null);
 
   useEffect(() => {
     if (isOpen) {
@@ -134,6 +137,10 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
       setRulesDraft(propRules);
       setClipboardDraft(propClipboard);
       setClipboardExtText(propClipboard.extensions.join(', '));
+      setConnectorMsg('');
+      setConnectorOk(null);
+      setFolderMsg('');
+      setFolderOk(null);
       getAutostartStatus().then((status) => {
         setIsAutostart(status);
       });
@@ -170,10 +177,13 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
   const handleInstallConnector = async () => {
     setConnectorLoading(true);
     setConnectorMsg('');
+    setConnectorOk(null);
     try {
       const res = await installBrowserExtensionHost();
+      setConnectorOk(res.success);
       setConnectorMsg(res.message);
     } catch (e) {
+      setConnectorOk(false);
       setConnectorMsg(String(e));
     } finally {
       setConnectorLoading(false);
@@ -181,7 +191,16 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
   };
 
   const handleOpenFolder = async () => {
-    await openExtensionFolder();
+    setFolderMsg('');
+    setFolderOk(null);
+    try {
+      const res = await openExtensionFolder();
+      setFolderOk(res.success);
+      setFolderMsg(res.message);
+    } catch (e) {
+      setFolderOk(false);
+      setFolderMsg(String(e));
+    }
   };
 
   if (!isOpen) return null;
@@ -411,7 +430,13 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
                     </span>
                   </button>
                   {connectorMsg && (
-                    <p className="text-[11px] text-emerald-400 font-medium">{connectorMsg}</p>
+                    <p
+                      className={`text-[11px] font-medium ${
+                        connectorOk === false ? 'text-danger' : 'text-emerald-400'
+                      }`}
+                    >
+                      {connectorMsg}
+                    </p>
                   )}
                 </div>
 
@@ -431,6 +456,15 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
                     <FolderOpen className="w-3.5 h-3.5 text-accent" />
                     <span>{t('settings.openExtFolder')}</span>
                   </button>
+                  {folderMsg && (
+                    <p
+                      className={`text-[11px] font-medium ${
+                        folderOk === false ? 'text-danger' : 'text-emerald-400'
+                      }`}
+                    >
+                      {folderMsg}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>

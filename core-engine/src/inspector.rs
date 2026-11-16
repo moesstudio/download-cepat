@@ -533,7 +533,7 @@ impl UrlInspector {
         if let Some(ref m) = media_info {
             suggested_category = "video".to_string();
             if file_name == "watch" || file_name == "download.bin" || !file_name.contains('.') {
-                file_name = format!("{}.mp4", m.title);
+                file_name = sanitize_filename(&format!("{}.mp4", m.title));
             }
         }
 
@@ -648,12 +648,58 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8(result).unwrap_or_else(|_| s.to_string())
 }
 
-fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name.chars().map(|c| match c {
-        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-        other => other,
-    }).collect();
-    if cleaned.is_empty() { "download.bin".to_string() } else { cleaned }
+pub fn sanitize_filename(name: &str) -> String {
+    let mut cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control()
+                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    cleaned = cleaned.trim().trim_end_matches(['.', ' ']).to_string();
+
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return "download.bin".to_string();
+    }
+
+    let stem = cleaned.split('.').next().unwrap_or("");
+    let stem_upper = stem.to_ascii_uppercase();
+    let is_dos_reserved = matches!(
+        stem_upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if is_dos_reserved {
+        cleaned = format!("_{}", cleaned);
+    }
+
+    cleaned
 }
 
 pub fn categorize_filename(name: &str) -> String {

@@ -524,7 +524,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 24000);
+          const timeoutId = setTimeout(() => controller.abort(), 60000);
           const res = await fetch("http://127.0.0.1:18291/inspect", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -571,7 +571,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 4000);
+          const timeoutId = setTimeout(() => controller.abort(), 10000);
           const res = await fetch("http://127.0.0.1:18291/start_download", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

@@ -10,6 +10,8 @@ import {
   parseUrlListText,
   formatProxyUrl,
   findMatchingSiteLogin,
+  getParentDir,
+  joinDestinationPath,
   matchCategoryForFile,
   isWithinScheduleWindow,
   shouldInterceptClipboardUrl,
@@ -657,5 +659,40 @@ describe('Download Cepat UI Suite', () => {
     expect(screen.getByText('Modul Ekstensi Browser (Chrome & Firefox)')).toBeInTheDocument();
     expect(document.body.textContent).toContain('Download Cepat');
     expect(document.body.textContent).toContain('Ujang Mustamar');
+  });
+
+  it('F17: Preserves Windows/POSIX paths in path helpers and classifies .appimage under Programs', () => {
+    // Windows drive, subfolder, root drive, and mixed slash handling
+    expect(getParentDir('C:\\Users\\Alice\\Downloads\\file.zip')).toBe('C:\\Users\\Alice\\Downloads');
+    expect(getParentDir('C:\\file.zip')).toBe('C:\\');
+    expect(getParentDir('D:/Media/clip.mp4')).toBe('D:\\Media');
+    expect(getParentDir('~/Downloads/Video/v.mp4')).toBe('~/Downloads/Video');
+    expect(getParentDir('/home/alice/archive.tar.gz')).toBe('/home/alice');
+
+    expect(joinDestinationPath('C:\\Users\\Alice\\Downloads\\', 'setup.exe')).toBe(
+      'C:\\Users\\Alice\\Downloads\\setup.exe'
+    );
+    expect(joinDestinationPath('C:\\', 'root.zip')).toBe('C:\\root.zip');
+    expect(joinDestinationPath('~/Downloads/Programs/', 'Tool.AppImage')).toBe(
+      '~/Downloads/Programs/Tool.AppImage'
+    );
+    expect(joinDestinationPath('/', 'top.bin')).toBe('/top.bin');
+
+    // Linux .appimage classification in rules helper and AddUrlModal
+    expect(matchCategoryForFile('Tool-x86_64.AppImage', DEFAULT_CATEGORY_RULES)).toEqual({
+      categoryId: 'programs',
+      saveDir: '~/Downloads/Programs',
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: /Tambah URL/i }));
+    const urlInput = screen.getByPlaceholderText(/https:\/\/example\.com\/file\.zip/i);
+    fireEvent.change(urlInput, {
+      target: { value: 'https://example.com/releases/App-1.0.0-x86_64.AppImage' },
+    });
+
+    const selects = screen.getAllByRole('combobox') as HTMLSelectElement[];
+    expect(selects.some((s) => s.value === 'programs')).toBe(true);
+    expect(screen.getByDisplayValue('~/Downloads/Programs')).toBeInTheDocument();
   });
 });

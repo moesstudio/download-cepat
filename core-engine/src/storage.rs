@@ -121,7 +121,7 @@ impl Storage {
                 task.error_message,
                 task.category_id,
                 task.destination_path,
-                "/tmp", // temp_directory
+                std::env::temp_dir().to_string_lossy().as_ref(), // temp_directory
                 task.mime_type,
                 task.etag,
                 task.last_modified,

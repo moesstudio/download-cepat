@@ -53,6 +53,7 @@ import {
   findMatchingSiteLogin,
   formatProxyUrl,
   isWithinScheduleWindow,
+  joinDestinationPath,
   matchCategoryForFile,
   parseUrlListText,
   shouldInterceptClipboardUrl,
@@ -443,7 +444,7 @@ export const App: React.FC = () => {
               ? 'canceled'
               : 'downloading';
             const nextDest = p.destination_path || t.destinationPath;
-            const destBase = nextDest.split('/').pop();
+            const destBase = nextDest.split(/[\\/]/).pop();
             const nextFileName =
               destBase && nextDest !== t.destinationPath ? destBase : t.fileName;
 
@@ -984,7 +985,7 @@ export const App: React.FC = () => {
       supportsRange?: boolean;
     }
   ) => {
-    const destinationPath = `${destinationDir}/${fileName}`;
+    const destinationPath = joinDestinationPath(destinationDir, fileName);
     const activeCount = tasks.filter((t) => t.status === 'downloading' || t.status === 'connecting').length;
     const scheduleBlocked = schedulerConfig.enabled && !isWithinScheduleWindow(schedulerConfig);
     const isQueued = activeCount >= settings.maxTasks || scheduleBlocked;
@@ -1253,7 +1254,7 @@ export const App: React.FC = () => {
         downloadedBytes: 0,
         status: 'queued' as TaskStatus,
         categoryId,
-        destinationPath: `${saveDir}/${fileName}`,
+        destinationPath: joinDestinationPath(saveDir, fileName),
         supportsRange: true,
         numConnections: settings.defaultConnections,
         speedLimitBytesPerSec: settings.speedLimitKbs * 1024,
