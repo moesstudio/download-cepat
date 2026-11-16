@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { DownloadCloud, ExternalLink } from 'lucide-react';
 import {
+  AppUpdateInfo,
+  AppUpdateProgress,
   BuildInfo,
   Category,
   CategoryRule,
@@ -41,6 +44,9 @@ import {
   readTextFilePreview,
   runPostDownloadAction,
   getBuildInfo,
+  checkForAppUpdate,
+  downloadAndInstallAppUpdate,
+  openExternalUrl,
   setTrayLanguage,
   isTauri,
 } from './services/nativeBridge.ts';
@@ -53,6 +59,7 @@ import {
   findMatchingSiteLogin,
   formatProxyUrl,
   isWithinScheduleWindow,
+  joinDestinationPath,
   matchCategoryForFile,
   parseUrlListText,
   shouldInterceptClipboardUrl,
@@ -399,6 +406,114 @@ export const App: React.FC = () => {
     }
   };
 
+  // In-app Auto-Update state & lifecycle
+  const [autoUpdateEnabled, setAutoUpdateEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('download_cepat_auto_update');
+      if (saved === 'false') return false;
+    } catch {}
+    return true;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('download_cepat_auto_update', String(autoUpdateEnabled));
+    } catch {}
+  }, [autoUpdateEnabled]);
+
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState(false);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<AppUpdateProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const handleCheckForUpdate = React.useCallback(async (silent = false) => {
+    setUpdateChecking(true);
+    setUpdateError(null);
+    try {
+      const info = await checkForAppUpdate();
+      setAppUpdateInfo(info);
+      if (info.updateAvailable) {
+        setUpdateBannerDismissed(false);
+        if (!silent) {
+          showToast(
+            translate(langRef.current, 'toast.updateAvailable', { version: info.latestVersion }),
+            'info'
+          );
+        }
+      } else if (!silent) {
+        showToast(
+          translate(langRef.current, 'toast.updateUpToDate', { version: info.currentVersion }),
+          'success'
+        );
+      }
+    } catch (err) {
+      const errText = String(err);
+      setUpdateError(errText);
+      if (!silent) {
+        showToast(
+          translate(langRef.current, 'toast.updateFailed', { error: errText }),
+          'warning'
+        );
+      }
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, []);
+
+  const handleInstallUpdate = React.useCallback(async () => {
+    setUpdateInstalling(true);
+    setUpdateError(null);
+    setUpdateProgress({
+      stage: 'checking',
+      downloadedBytes: 0,
+      totalBytes: appUpdateInfo?.assetSize ?? null,
+      progressPercent: 0,
+      message: translate(langRef.current, 'update.checkingBtn'),
+    });
+    try {
+      const result = await downloadAndInstallAppUpdate();
+      showToast(result.message, result.startedInPlace ? 'success' : 'info');
+      if (!result.startedInPlace) {
+        setUpdateInstalling(false);
+      }
+    } catch (err) {
+      const errText = String(err);
+      setUpdateError(errText);
+      setUpdateInstalling(false);
+      showToast(
+        translate(langRef.current, 'toast.updateFailed', { error: errText }),
+        'warning'
+      );
+    }
+  }, [appUpdateInfo]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlistenUpdateProgress: (() => void) | undefined;
+    listen<AppUpdateProgress>('app-update-progress', (event) => {
+      if (event.payload) {
+        setUpdateProgress(event.payload);
+      }
+    })
+      .then((u) => {
+        unlistenUpdateProgress = u;
+      })
+      .catch(() => {});
+
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+    if (autoUpdateEnabled) {
+      startupTimer = setTimeout(() => {
+        void handleCheckForUpdate(true);
+      }, 3000);
+    }
+
+    return () => {
+      if (unlistenUpdateProgress) unlistenUpdateProgress();
+      if (startupTimer) clearTimeout(startupTimer);
+    };
+  }, [autoUpdateEnabled, handleCheckForUpdate]);
+
   // Real network download telemetry from Rust Core
   useEffect(() => {
     if (!isTauri()) return;
@@ -443,7 +558,7 @@ export const App: React.FC = () => {
               ? 'canceled'
               : 'downloading';
             const nextDest = p.destination_path || t.destinationPath;
-            const destBase = nextDest.split('/').pop();
+            const destBase = nextDest.split(/[\\/]/).pop();
             const nextFileName =
               destBase && nextDest !== t.destinationPath ? destBase : t.fileName;
 
@@ -984,7 +1099,7 @@ export const App: React.FC = () => {
       supportsRange?: boolean;
     }
   ) => {
-    const destinationPath = `${destinationDir}/${fileName}`;
+    const destinationPath = joinDestinationPath(destinationDir, fileName);
     const activeCount = tasks.filter((t) => t.status === 'downloading' || t.status === 'connecting').length;
     const scheduleBlocked = schedulerConfig.enabled && !isWithinScheduleWindow(schedulerConfig);
     const isQueued = activeCount >= settings.maxTasks || scheduleBlocked;
@@ -1253,7 +1368,7 @@ export const App: React.FC = () => {
         downloadedBytes: 0,
         status: 'queued' as TaskStatus,
         categoryId,
-        destinationPath: `${saveDir}/${fileName}`,
+        destinationPath: joinDestinationPath(saveDir, fileName),
         supportsRange: true,
         numConnections: settings.defaultConnections,
         speedLimitBytesPerSec: settings.speedLimitKbs * 1024,
@@ -1535,6 +1650,84 @@ export const App: React.FC = () => {
             onClearMarked={handleClearMarked}
           />
 
+          {/* In-App Auto-Update Banner */}
+          {appUpdateInfo?.updateAvailable && !updateBannerDismissed && (
+            <div
+              role="region"
+              aria-label={translate(lang, 'update.sectionTitle')}
+              className="mx-3 mt-2 px-3 py-2 rounded-lg bg-accent/10 border border-accent/30 flex flex-wrap items-center justify-between gap-2.5 text-xs shrink-0"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <DownloadCloud className="w-4 h-4 text-accent shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-bold text-text">
+                      {translate(lang, 'update.bannerTitle', {
+                        version: appUpdateInfo.latestVersion,
+                      })}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-mono text-[10px] font-semibold">
+                      v{appUpdateInfo.currentVersion} → v{appUpdateInfo.latestVersion}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-text-muted truncate">
+                    {updateInstalling && updateProgress
+                      ? translate(lang, 'update.installingStatus', {
+                          message: updateProgress.message,
+                          pct: Math.round(updateProgress.progressPercent),
+                        })
+                      : appUpdateInfo.inPlaceSupported && appUpdateInfo.assetSha256
+                        ? translate(lang, 'update.bannerInPlace', {
+                            asset: appUpdateInfo.assetName || `v${appUpdateInfo.latestVersion}`,
+                          })
+                        : translate(lang, 'update.bannerManual', {
+                            asset: appUpdateInfo.assetName || `v${appUpdateInfo.latestVersion}`,
+                          })}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2 shrink-0">
+                {appUpdateInfo.inPlaceSupported && appUpdateInfo.assetSha256 ? (
+                  <button
+                    type="button"
+                    disabled={updateInstalling}
+                    onClick={() => void handleInstallUpdate()}
+                    className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-accent text-on-accent hover:bg-accent-hover font-semibold text-[11px] disabled:opacity-50 cursor-pointer shadow-sm"
+                  >
+                    <DownloadCloud className="w-3.5 h-3.5" />
+                    <span>
+                      {updateInstalling
+                        ? translate(lang, 'update.updatingBtn', {
+                            pct: Math.round(updateProgress?.progressPercent ?? 0),
+                          })
+                        : translate(lang, 'update.installNowBtn')}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void openExternalUrl(appUpdateInfo.releaseUrl)}
+                    className="flex items-center space-x-1.5 px-3 py-1 rounded-md bg-accent text-on-accent hover:bg-accent-hover font-semibold text-[11px] cursor-pointer shadow-sm"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>{translate(lang, 'update.openReleaseBtn')}</span>
+                  </button>
+                )}
+
+                {!updateInstalling && (
+                  <button
+                    type="button"
+                    onClick={() => setUpdateBannerDismissed(true)}
+                    className="px-2 py-1 rounded-md border border-border text-text-muted hover:text-text hover:bg-surface text-[11px] cursor-pointer"
+                  >
+                    {translate(lang, 'update.dismissBtn')}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* S01: Task Data Table */}
           <TaskDataTable
             tasks={filteredTasks}
@@ -1667,6 +1860,15 @@ export const App: React.FC = () => {
         categoryRules={categoryRules}
         clipboardConfig={clipboardConfig}
         buildInfo={buildInfo}
+        autoUpdateEnabled={autoUpdateEnabled}
+        onToggleAutoUpdate={setAutoUpdateEnabled}
+        updateInfo={appUpdateInfo}
+        updateChecking={updateChecking}
+        updateInstalling={updateInstalling}
+        updateProgress={updateProgress}
+        updateError={updateError}
+        onCheckForUpdate={() => void handleCheckForUpdate(false)}
+        onInstallUpdate={() => void handleInstallUpdate()}
         onChangeLanguage={handleNotifyLanguageChange}
         onSaveSpeedLimit={(limitKbs) => {
           setSpeedLimitKbs(limitKbs);

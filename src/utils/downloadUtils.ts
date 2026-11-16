@@ -265,8 +265,40 @@ export const formatDiskBytes = (
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 };
 
+export const isWindowsPath = (path: string): boolean => {
+  const trimmed = path.trim();
+  if (/^[a-zA-Z]:([\\/]|$)/.test(trimmed) || trimmed.startsWith('\\\\')) {
+    return true;
+  }
+  return trimmed.includes('\\') && !trimmed.includes('/');
+};
+
 export const getParentDir = (fullPath: string): string => {
-  const clean = fullPath.replace(/\\/g, '/');
-  const idx = clean.lastIndexOf('/');
-  return idx > 0 ? clean.slice(0, idx) : '~/Downloads';
+  const trimmed = fullPath.trim();
+  if (!trimmed) return '~/Downloads';
+  const win = isWindowsPath(trimmed);
+  const sep = win ? '\\' : '/';
+  const normalized = win ? trimmed.replace(/\//g, '\\') : trimmed.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf(sep);
+  if (idx < 0) return '~/Downloads';
+  if (idx === 0) return win ? normalized.slice(0, 1) : '~/Downloads';
+  if (win && /^[a-zA-Z]:$/.test(normalized.slice(0, idx))) {
+    return `${normalized.slice(0, idx)}\\`;
+  }
+  return normalized.slice(0, idx);
+};
+
+export const joinDestinationPath = (dir: string, fileName: string): string => {
+  const cleanDir = dir.trim();
+  const cleanName = fileName.trim().replace(/^[\\/]+/, '');
+  if (!cleanDir) return cleanName;
+  if (!cleanName) return cleanDir;
+  const win = isWindowsPath(cleanDir);
+  const sep = win ? '\\' : '/';
+  const normalizedDir = win ? cleanDir.replace(/\//g, '\\') : cleanDir.replace(/\\/g, '/');
+  if (normalizedDir === '/' || /^[a-zA-Z]:\\$/.test(normalizedDir)) {
+    return `${normalizedDir}${cleanName}`;
+  }
+  const trimmedDir = normalizedDir.replace(/[\\/]+$/, '');
+  return trimmedDir ? `${trimmedDir}${sep}${cleanName}` : `${sep}${cleanName}`;
 };

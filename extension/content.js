@@ -13,6 +13,8 @@ const DC_CONTENT_I18N = {
     checkingFormats: 'Memeriksa resolusi yang tersedia di server...',
     disconnectedTitle: 'Download Cepat belum terhubung',
     disconnectedDesc: 'Pastikan aplikasi Download Cepat di desktop Anda sedang terbuka.',
+    notFoundTitle: 'Format video tidak ditemukan',
+    notFoundHint: 'Coba muat ulang halaman atau klik Coba Lagi.',
     chooseQuality: 'Pilih Kualitas Video',
     audioOnly: '🎵 Audio Saja (MP3 & M4A)',
     bgStarted: 'Unduhan Dimulai di Latar Belakang!',
@@ -27,6 +29,8 @@ const DC_CONTENT_I18N = {
     checkingFormats: 'Checking available resolutions from server...',
     disconnectedTitle: 'Download Cepat is not connected',
     disconnectedDesc: 'Make sure the Download Cepat desktop app is running.',
+    notFoundTitle: 'Video formats not found',
+    notFoundHint: 'Try reloading the page or click Retry.',
     chooseQuality: 'Select Video Quality',
     audioOnly: '🎵 Audio Only (MP3 & M4A)',
     bgStarted: 'Download Started in Background!',
@@ -41,6 +45,8 @@ const DC_CONTENT_I18N = {
     checkingFormats: 'Memeriksa resolusi yang tersedia di pelayan...',
     disconnectedTitle: 'Download Cepat belum bersambung',
     disconnectedDesc: 'Pastikan aplikasi desktop Download Cepat anda sedang dibuka.',
+    notFoundTitle: 'Format video tidak ditemui',
+    notFoundHint: 'Cuba muat semula halaman atau klik Cuba Lagi.',
     chooseQuality: 'Pilih Kualiti Video',
     audioOnly: '🎵 Audio Sahaja (MP3 & M4A)',
     bgStarted: 'Muat Turun Dimulakan di Latar Belakang!',
@@ -55,6 +61,8 @@ const DC_CONTENT_I18N = {
     checkingFormats: 'サーバーから利用可能な解像度を確認中...',
     disconnectedTitle: 'Download Cepat に接続されていません',
     disconnectedDesc: 'デスクトップ版 Download Cepat が起動していることを確認してください。',
+    notFoundTitle: '動画形式が見つかりません',
+    notFoundHint: 'ページを再読み込みするか、再試行をクリックしてください。',
     chooseQuality: '画質を選択',
     audioOnly: '🎵 音声のみ (MP3 & M4A)',
     bgStarted: 'バックグラウンドでダウンロード開始！',
@@ -67,6 +75,15 @@ const DC_CONTENT_I18N = {
 function dcText(key) {
   const dict = DC_CONTENT_I18N[dcContentLang] || DC_CONTENT_I18N.id;
   return dict[key] || DC_CONTENT_I18N.id[key] || '';
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function updateFloatingButtonLabels() {
@@ -416,9 +433,9 @@ function renderDropdownStatusMessage(dropdown, titleText, detailText, allowRetry
       ">✕</button>
     </div>
     <div style="padding: 14px; color: #f87171; font-size: 11px; text-align: center; line-height: 1.5;">
-      ⚠️ <strong>${titleText}</strong><br>
-      <span style="color: #94a3b8; font-size: 10px;">${detailText}</span>
-      ${allowRetry ? `<div style="margin-top: 8px;"><button class="dc-retry-btn" style="background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 10px; font-weight: 600; cursor: pointer;">${dcText('retryBtn')}</button></div>` : ''}
+      ⚠️ <strong>${escapeHtml(titleText)}</strong><br>
+      <span style="color: #94a3b8; font-size: 10px;">${escapeHtml(detailText)}</span>
+      ${allowRetry ? `<div style="margin-top: 8px;"><button class="dc-retry-btn" style="background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 4px 10px; font-size: 10px; font-weight: 600; cursor: pointer;">${escapeHtml(dcText('retryBtn'))}</button></div>` : ''}
     </div>
   `;
 
@@ -584,8 +601,8 @@ async function loadAvailableFormats(dropdown) {
       } else {
         renderDropdownStatusMessage(
           dropdown,
-          'Format video tidak ditemukan',
-          (data && data.message) || 'Coba muat ulang halaman atau klik Coba Lagi.',
+          dcText('notFoundTitle'),
+          (data && data.message) || dcText('notFoundHint'),
           true
         );
       }
@@ -608,10 +625,10 @@ function renderFormats(dropdown, data) {
 
   let html = `
     <div style="padding: 6px 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; display: flex; justify-content: space-between; align-items: center;">
-      <span>${dcText('chooseQuality')}</span>
+      <span>${escapeHtml(dcText('chooseQuality'))}</span>
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="color: #38bdf8;">Download Cepat ⚡</span>
-        <button type="button" class="dc-dropdown-close-btn" title="${dcText('closeMenu')}" style="
+        <button type="button" class="dc-dropdown-close-btn" title="${escapeHtml(dcText('closeMenu'))}" style="
           background: rgba(255, 255, 255, 0.08);
           border: 1px solid rgba(255, 255, 255, 0.15);
           color: #94a3b8;
@@ -644,7 +661,7 @@ function renderFormats(dropdown, data) {
     const badgeColor = isHigh ? '#2563eb' : '#334155';
 
     html += `
-      <div class="dc-format-item" data-fmt-id="${fmt.formatId}" style="
+      <div class="dc-format-item" data-fmt-id="${escapeHtml(fmt.formatId)}" style="
         padding: 8px 12px;
         display: flex;
         align-items: center;
@@ -663,13 +680,13 @@ function renderFormats(dropdown, data) {
             padding: 2px 6px;
             border-radius: 4px;
             font-family: monospace;
-          ">${badgeText}</span>
+          ">${escapeHtml(badgeText)}</span>
           <span style="font-size: 11px; font-weight: 500; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-            ${fmt.resolution}
+            ${escapeHtml(fmt.resolution)}
           </span>
         </div>
         <span style="font-size: 10px; font-family: monospace; color: #94a3b8; shrink-0;">
-          ${fmt.sizeLabel || formatBytes(fmt.fileSizeApprox)}
+          ${escapeHtml(fmt.sizeLabel || formatBytes(fmt.fileSizeApprox))}
         </span>
       </div>
     `;
@@ -679,7 +696,7 @@ function renderFormats(dropdown, data) {
   if (audioFormats.length > 0) {
     html += `
       <div style="padding: 6px 12px; background: rgba(255,255,255,0.02); font-size: 9px; font-weight: 600; text-transform: uppercase; color: #64748b; border-top: 1px solid rgba(255,255,255,0.08); border-bottom: 1px solid rgba(255,255,255,0.04);">
-        ${dcText('audioOnly')}
+        ${escapeHtml(dcText('audioOnly'))}
       </div>
     `;
 
@@ -690,7 +707,7 @@ function renderFormats(dropdown, data) {
       const badgeColor = isMp3 ? '#059669' : '#0284c7';
 
       html += `
-        <div class="dc-format-item" data-fmt-id="${fmt.formatId}" style="
+        <div class="dc-format-item" data-fmt-id="${escapeHtml(fmt.formatId)}" style="
           padding: 8px 12px;
           display: flex;
           align-items: center;
@@ -709,13 +726,13 @@ function renderFormats(dropdown, data) {
               padding: 2px 6px;
               border-radius: 4px;
               font-family: monospace;
-            ">${badgeText}</span>
+            ">${escapeHtml(badgeText)}</span>
             <span style="font-size: 11px; font-weight: 500; color: #f1f5f9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-              ${fmt.resolution}
+              ${escapeHtml(fmt.resolution)}
             </span>
           </div>
           <span style="font-size: 10px; font-family: monospace; color: #94a3b8; shrink-0;">
-            ${fmt.sizeLabel || formatBytes(fmt.fileSizeApprox)}
+            ${escapeHtml(fmt.sizeLabel || formatBytes(fmt.fileSizeApprox))}
           </span>
         </div>
       `;
@@ -797,14 +814,18 @@ function renderFormats(dropdown, data) {
         }
 
         if (resultData) {
+          const safeTitle = escapeHtml(title);
+          const safeResolution = escapeHtml(selected.resolution);
+          const safeSize = escapeHtml(selected.sizeLabel || formatBytes(selected.fileSizeApprox));
           showInPageToast(`
-            <strong>${dcText('bgStarted')}</strong><br>
-            <span style="color: #94a3b8;">${title}</span><br>
-            <span style="color: #38bdf8; font-weight: 600;">${selected.resolution}</span> (${selected.sizeLabel || formatBytes(selected.fileSizeApprox)})
+            <strong>${escapeHtml(dcText('bgStarted'))}</strong><br>
+            <span style="color: #94a3b8;">${safeTitle}</span><br>
+            <span style="color: #38bdf8; font-weight: 600;">${safeResolution}</span> (${safeSize})
           `);
         }
       } catch (err) {
-        showInPageToast(`${dcText('startFailed')}: ${err.message}`, true);
+        const errMsg = err && err.message ? err.message : String(err);
+        showInPageToast(`${escapeHtml(dcText('startFailed'))}: ${escapeHtml(errMsg)}`, true);
       }
     });
   });

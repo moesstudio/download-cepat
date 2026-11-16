@@ -51,16 +51,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name || 'v1.0.0' }}
+          tagName: ${{ github.ref_name || 'v__VERSION__' }}
           releaseName: 'Download Cepat v__VERSION__'
           releaseBody: |
             ### Download Cepat v__VERSION__
             Official release built and maintained by **Ujang Mustamar**.
-            Multi-connection high-speed download manager desktop release for macOS, Windows, and Linux.
+            Multi-connection high-speed download manager desktop release for macOS, Windows, and Linux — lengkap dengan fitur **In-App Auto-Update** terverifikasi SHA-256 dan perbaikan lintas platform Windows & Linux.
 
             #### 📦 Paket Installer Tersedia:
-            - **macOS**: `Download Cepat_1.0.0_universal.dmg` (Apple Silicon & Intel)
-            - **Windows**: `Download Cepat_1.0.0_x64-setup.exe` (NSIS Installer) & `.msi`
-            - **Linux**: `download-cepat_1.0.0_amd64.AppImage` & `.deb`
+            - **macOS**: `Download.Cepat___VERSION___aarch64.dmg` & `.app.tar.gz` (In-App Auto-Update)
+            - **Windows**: `Download.Cepat___VERSION___x64-setup.exe` (NSIS Installer) & `.msi`
+            - **Linux**: `Download.Cepat___VERSION___amd64.AppImage`, `.deb` & `.rpm`
           releaseDraft: false
           prerelease: false

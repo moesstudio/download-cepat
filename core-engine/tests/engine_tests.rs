@@ -1233,3 +1233,309 @@ async fn test_checksums_disk_space_ftp_and_grabber() {
     assert!(grabbed.iter().any(|g| g.file_name == "clip.mp4"));
     web_handle.abort();
 }
+
+#[test]
+fn test_sanitize_filename_windows_and_linux_safety() {
+    use core_engine::inspector::sanitize_filename;
+
+    assert_eq!(sanitize_filename("report:final/2026?.pdf"), "report_final_2026_.pdf");
+    assert_eq!(sanitize_filename("CON.txt"), "_CON.txt");
+    assert_eq!(sanitize_filename("nul"), "_nul");
+    assert_eq!(sanitize_filename("com1.log"), "_com1.log");
+    assert_eq!(sanitize_filename("LPT9.tar.gz"), "_LPT9.tar.gz");
+    assert_eq!(sanitize_filename("normal-con.txt"), "normal-con.txt");
+    assert_eq!(sanitize_filename("trailing.dots..  "), "trailing.dots");
+    assert_eq!(sanitize_filename("..."), "download.bin");
+    assert_eq!(sanitize_filename(".."), "download.bin");
+    assert_eq!(sanitize_filename("bad\0name\nline.bin"), "bad_name_line.bin");
+    assert_eq!(sanitize_filename("   "), "download.bin");
+}
+
+#[test]
+fn test_available_disk_space_probes() {
+    use core_engine::integrity::available_disk_space;
+
+    let temp_dir = std::env::temp_dir();
+    let existing_space = available_disk_space(&temp_dir);
+    assert!(existing_space.unwrap_or(0) > 0);
+
+    let non_existent_nested = temp_dir.join("dc_nonexistent_subdir_12345").join("nested").join("file.iso");
+    let nested_space = available_disk_space(&non_existent_nested);
+    assert!(nested_space.unwrap_or(0) > 0);
+}
+
+#[test]
+fn test_updater_semver_and_platform_selection() {
+    use core_engine::updater::{
+        compare_versions, evaluate_release, extract_sha256_digest, is_trusted_release_url,
+        GitHubReleaseAsset, GitHubReleasePayload, PlatformEnvironment,
+    };
+    use std::cmp::Ordering;
+
+    assert_eq!(compare_versions("1.0.1", "v1.0.2"), Ordering::Less);
+    assert_eq!(compare_versions("1.0.2", "v1.0.2"), Ordering::Equal);
+    assert_eq!(compare_versions("1.1.0", "1.0.9"), Ordering::Greater);
+    assert_eq!(compare_versions("1.0.2-beta.1", "1.0.2"), Ordering::Less);
+
+    assert!(is_trusted_release_url("https://github.com/moesstudio/download-cepat/releases/download/v1.0.1/app.exe"));
+    assert!(is_trusted_release_url("https://objects.githubusercontent.com/file.bin"));
+    assert!(!is_trusted_release_url("http://github.com/file.bin"));
+    assert!(!is_trusted_release_url("https://evil.example.com/file.exe"));
+
+    let digest = extract_sha256_digest(Some(
+        "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+    ));
+    assert_eq!(
+        digest.as_deref(),
+        Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    );
+    assert!(extract_sha256_digest(Some("sha256:short")).is_none());
+
+    let release = GitHubReleasePayload {
+        tag_name: "v1.0.2".to_string(),
+        name: Some("Download Cepat v1.0.2".to_string()),
+        body: Some("Auto update support".to_string()),
+        html_url: "https://github.com/moesstudio/download-cepat/releases/tag/v1.0.2".to_string(),
+        published_at: Some("2026-11-16T00:00:00Z".to_string()),
+        draft: Some(false),
+        prerelease: Some(false),
+        assets: vec![
+            GitHubReleaseAsset {
+                name: "Download.Cepat_1.0.2_x64-setup.exe".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_x64-setup.exe".to_string(),
+                size: 5_000_000,
+                digest: Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            },
+            GitHubReleaseAsset {
+                name: "Download.Cepat_1.0.2_x64_en-US.msi".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_x64_en-US.msi".to_string(),
+                size: 6_000_000,
+                digest: None,
+            },
+            GitHubReleaseAsset {
+                name: "Download.Cepat_aarch64.app.tar.gz".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_aarch64.app.tar.gz".to_string(),
+                size: 6_200_000,
+                digest: None,
+            },
+            GitHubReleaseAsset {
+                name: "Download.Cepat_1.0.2_aarch64.dmg".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_aarch64.dmg".to_string(),
+                size: 7_000_000,
+                digest: None,
+            },
+            GitHubReleaseAsset {
+                name: "Download.Cepat_1.0.2_amd64.AppImage".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_amd64.AppImage".to_string(),
+                size: 85_000_000,
+                digest: None,
+            },
+            GitHubReleaseAsset {
+                name: "Download.Cepat_1.0.2_amd64.deb".to_string(),
+                browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_amd64.deb".to_string(),
+                size: 7_000_000,
+                digest: None,
+            },
+        ],
+    };
+
+    let win_info = evaluate_release(
+        "1.0.1",
+        &release,
+        &PlatformEnvironment {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert!(win_info.update_available);
+    assert_eq!(win_info.install_kind, "windows_nsis");
+    assert!(win_info.in_place_supported);
+    assert_eq!(win_info.asset_name.as_deref(), Some("Download.Cepat_1.0.2_x64-setup.exe"));
+
+    let mac_info = evaluate_release(
+        "1.0.1",
+        &release,
+        &PlatformEnvironment {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: true,
+        },
+    );
+    assert_eq!(mac_info.install_kind, "macos_app_tarball");
+    assert!(mac_info.in_place_supported);
+
+    let linux_appimage_info = evaluate_release(
+        "1.0.1",
+        &release,
+        &PlatformEnvironment {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            is_appimage: true,
+            has_dpkg: true,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert_eq!(linux_appimage_info.install_kind, "linux_appimage");
+
+    let linux_deb_info = evaluate_release(
+        "1.0.1",
+        &release,
+        &PlatformEnvironment {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            is_appimage: false,
+            has_dpkg: true,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert_eq!(linux_deb_info.install_kind, "linux_deb");
+
+    let same_ver = evaluate_release(
+        "1.0.2",
+        &release,
+        &PlatformEnvironment {
+            os: "windows".to_string(),
+            arch: "x86_64".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert!(!same_ver.update_available);
+}
+
+#[tokio::test]
+async fn test_updater_fetch_and_sha256_verification() {
+    use core_engine::updater::{download_verified_asset, evaluate_release, fetch_release_from_url, PlatformEnvironment};
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let binary_payload = b"Download-Cepat-Updated-Installer-Payload-v1.0.2".to_vec();
+    let expected_sha = hex::encode(Sha256::digest(&binary_payload));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind test updater server");
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let payload_for_srv = binary_payload.clone();
+    let sha_for_srv = expected_sha.clone();
+    let base_for_srv = base_url.clone();
+    let srv_handle = tokio::spawn(async move {
+        for _ in 0..3 {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.starts_with("GET /latest") {
+                    let body = serde_json::json!({
+                        "tag_name": "v1.0.2",
+                        "name": "Download Cepat v1.0.2",
+                        "body": "Perbaikan lintas OS + Auto Update",
+                        "html_url": "https://github.com/moesstudio/download-cepat/releases/tag/v1.0.2",
+                        "assets": [{
+                            "name": "Download.Cepat_1.0.2_amd64.AppImage",
+                            "browser_download_url": "https://github.com/moesstudio/download-cepat/releases/download/v1.0.2/Download.Cepat_1.0.2_amd64.AppImage",
+                            "size": payload_for_srv.len(),
+                            "digest": format!("sha256:{}", sha_for_srv)
+                        }]
+                    })
+                    .to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else if req.starts_with("GET /asset") {
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload_for_srv.len()
+                    );
+                    let _ = stream.write_all(hdr.as_bytes()).await;
+                    let _ = stream.write_all(&payload_for_srv).await;
+                }
+            }
+        }
+    });
+
+    let release = fetch_release_from_url(&format!("{}/latest", base_for_srv), "1.0.1", false)
+        .await
+        .expect("fetch mock release succeeds");
+    let info = evaluate_release(
+        "1.0.1",
+        &release,
+        &PlatformEnvironment {
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            is_appimage: true,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert!(info.update_available);
+    assert_eq!(info.asset_sha256.as_deref(), Some(expected_sha.as_str()));
+
+    let dir = std::env::temp_dir().join(format!("dc_updater_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let ok_path = dir.join("Download.Cepat_1.0.2_amd64.AppImage");
+    let mut progress_hits = 0usize;
+    let bytes_written = download_verified_asset(
+        &format!("{}/asset", base_for_srv),
+        &ok_path,
+        &expected_sha,
+        "1.0.1",
+        false,
+        |dl, total| {
+            progress_hits += 1;
+            assert!(dl <= total.unwrap_or(dl));
+        },
+    )
+    .await
+    .expect("verified download succeeds");
+    assert_eq!(bytes_written, binary_payload.len() as u64);
+    assert!(progress_hits >= 1);
+    assert_eq!(std::fs::read(&ok_path).unwrap(), binary_payload);
+
+    // Untrusted origin check must reject in enforced mode
+    let untrusted_res = download_verified_asset(
+        &format!("{}/asset", base_for_srv),
+        &ok_path,
+        &expected_sha,
+        "1.0.1",
+        true,
+        |_, _| {},
+    )
+    .await;
+    assert!(untrusted_res.is_err());
+
+    // Mismatched SHA-256 must fail and remove temporary file
+    let bad_path = dir.join("bad_asset.bin");
+    let mismatch_res = download_verified_asset(
+        &format!("{}/asset", base_for_srv),
+        &bad_path,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "1.0.1",
+        false,
+        |_, _| {},
+    )
+    .await;
+    assert!(mismatch_res.is_err());
+    assert!(!bad_path.exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    srv_handle.abort();
+}
+
+

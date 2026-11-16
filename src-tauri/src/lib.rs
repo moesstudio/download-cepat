@@ -215,8 +215,11 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
         }
     };
 
-    let mut temp_stream = target.to_path_buf();
-    temp_stream.set_extension("temp_stream.mp4");
+    let temp_streams: Vec<PathBuf> = ["temp_stream.mp4", "temp_stream.m4a"]
+        .into_iter()
+        .map(|ext| target.with_extension(ext))
+        .filter(|p| p != target)
+        .collect();
 
     let mut direct_candidates = vec![
         target.to_path_buf(),
@@ -224,7 +227,7 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
         PathBuf::from(format!("{}.part", target.display())),
         PathBuf::from(format!("{}.ytdl", target.display())),
     ];
-    if temp_stream != target {
+    for temp_stream in &temp_streams {
         direct_candidates.push(temp_stream.clone());
         direct_candidates.push(PathBuf::from(format!("{}.part", temp_stream.display())));
         direct_candidates.push(PathBuf::from(format!("{}.ytdl", temp_stream.display())));
@@ -237,15 +240,7 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
         target.parent(),
         target.file_name().and_then(|n| n.to_str()),
     ) {
-        let temp_name = temp_stream
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
         let stem = target
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let temp_stem = temp_stream
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
@@ -261,14 +256,17 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
                 };
                 let target_frag = name.starts_with(&format!("{}.part", target_name))
                     || name.starts_with(&format!("{}.ytdl", target_name));
-                let temp_frag = temp_stream != target
-                    && !temp_name.is_empty()
-                    && (name.starts_with(&format!("{}.part", temp_name))
-                        || name.starts_with(&format!("{}.ytdl", temp_name)));
+                let temp_frag = temp_streams.iter().any(|ts| {
+                    let temp_name = ts.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                    !temp_name.is_empty()
+                        && (name.starts_with(&format!("{}.part", temp_name))
+                            || name.starts_with(&format!("{}.ytdl", temp_name)))
+                });
                 let stream_split = (!stem.is_empty() && is_ytdlp_stream_fragment_file(&name, stem))
-                    || (temp_stream != target
-                        && !temp_stem.is_empty()
-                        && is_ytdlp_stream_fragment_file(&name, temp_stem));
+                    || temp_streams.iter().any(|ts| {
+                        let temp_stem = ts.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                        !temp_stem.is_empty() && is_ytdlp_stream_fragment_file(&name, temp_stem)
+                    });
 
                 if target_frag || temp_frag || stream_split {
                     remove_if_exists(&path);
@@ -290,6 +288,27 @@ fn unregister_active_download(task_id: &str) {
     if let Ok(mut map) = active_downloads().lock() {
         map.remove(task_id);
     }
+}
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn hide_window_std(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+fn hide_window_tokio(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 fn sanitize_cli_header(val: Option<&str>) -> Option<String> {
@@ -345,7 +364,11 @@ fn find_executable_in_dirs(bin_names: &[&str], extra_dirs: &[PathBuf]) -> Option
             } else {
                 dir.join(name)
             };
-            if candidate.is_file() {
+            if candidate.is_file()
+                && std::fs::metadata(&candidate)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+            {
                 return Some(candidate);
             }
         }
@@ -353,16 +376,67 @@ fn find_executable_in_dirs(bin_names: &[&str], extra_dirs: &[PathBuf]) -> Option
     None
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
 fn default_tool_dirs() -> Vec<PathBuf> {
     let mut dirs_list = Vec::new();
-    if let Some(home) = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)) {
+    if let Some(home) = user_home_dir() {
         dirs_list.push(home.join(".download-cepat").join("bin"));
+        dirs_list.push(home.join(".download-cepat").join("venv").join("bin"));
+        #[cfg(target_os = "windows")]
+        dirs_list.push(home.join(".download-cepat").join("venv").join("Scripts"));
+        dirs_list.push(home.join(".local").join("bin"));
         dirs_list.push(home.join(".deno").join("bin"));
         dirs_list.push(home.join(".bun").join("bin"));
+        #[cfg(target_os = "windows")]
+        dirs_list.push(home.join("scoop").join("shims"));
     }
-    dirs_list.push(PathBuf::from("/opt/homebrew/bin"));
-    dirs_list.push(PathBuf::from("/usr/local/bin"));
-    dirs_list.push(PathBuf::from("/usr/bin"));
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs_list.push(exe_dir.to_path_buf());
+            dirs_list.push(exe_dir.join("bin"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        dirs_list.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs_list.push(PathBuf::from("/usr/local/bin"));
+        dirs_list.push(PathBuf::from("/usr/bin"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        dirs_list.push(PathBuf::from("/usr/local/bin"));
+        dirs_list.push(PathBuf::from("/usr/bin"));
+        dirs_list.push(PathBuf::from("/snap/bin"));
+        dirs_list.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            dirs_list.push(local_app_data.join("Download Cepat").join("bin"));
+            dirs_list.push(local_app_data.join("Programs").join("yt-dlp"));
+            dirs_list.push(local_app_data.join("Microsoft").join("WinGet").join("Links"));
+        }
+        if let Some(program_data) = std::env::var_os("ProgramData").map(PathBuf::from) {
+            dirs_list.push(program_data.join("chocolatey").join("bin"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+            dirs_list.push(program_files.join("yt-dlp"));
+            dirs_list.push(program_files.join("ffmpeg").join("bin"));
+            dirs_list.push(program_files.join("nodejs"));
+        }
+        dirs_list.push(PathBuf::from(r"C:\yt-dlp"));
+        dirs_list.push(PathBuf::from(r"C:\ffmpeg\bin"));
+    }
+
     dirs_list
 }
 
@@ -404,17 +478,109 @@ fn apply_ytdlp_runtime_env(cmd: &mut tokio::process::Command) -> bool {
 }
 
 fn get_ytdlp_bin() -> Option<String> {
-    let home_dir = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
-    let ytdlp_candidates = [
-        format!("{}/.download-cepat/bin/yt-dlp", home_dir),
-        format!("{}/.download-cepat/venv/bin/yt-dlp", home_dir),
-        "/Users/mustamar/.download-cepat/bin/yt-dlp".to_string(),
-        "/Users/mustamar/.download-cepat/venv/bin/yt-dlp".to_string(),
-        "/Users/mustamar/.gemini/antigravity/brain/3cce09e5-7380-401d-9eee-538fa12dc83c/scratch/venv/bin/yt-dlp".to_string(),
-        "/opt/homebrew/bin/yt-dlp".to_string(),
-        "/usr/local/bin/yt-dlp".to_string(),
-    ];
-    ytdlp_candidates.into_iter().find(|p| Path::new(p).exists())
+    find_executable_in_dirs(&["yt-dlp"], &default_tool_dirs()).map(|p| p.display().to_string())
+}
+
+fn ytdlp_download_url_for(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
+        ("windows", _) => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+        ("macos", _) => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos",
+        ("linux", "aarch64") => {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64"
+        }
+        ("linux", "x86_64") => {
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+        }
+        _ => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+    }
+}
+
+async fn ensure_ytdlp_bin() -> Result<String, String> {
+    if let Some(existing) = get_ytdlp_bin() {
+        return Ok(existing);
+    }
+
+    static PROVISION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    let _guard = PROVISION_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    if let Some(existing) = get_ytdlp_bin() {
+        return Ok(existing);
+    }
+
+    let home = user_home_dir()
+        .ok_or_else(|| "Direktori home tidak ditemukan untuk memasang yt-dlp.".to_string())?;
+    let bin_dir = home.join(".download-cepat").join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Gagal membuat folder binari ({}): {}", bin_dir.display(), e))?;
+
+    let bin_name = format!("yt-dlp{}", std::env::consts::EXE_SUFFIX);
+    let dest_path = bin_dir.join(&bin_name);
+    let tmp_path = bin_dir.join(format!("{}.download", bin_name));
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let url = ytdlp_download_url_for(std::env::consts::OS, std::env::consts::ARCH);
+    log::info!("Mengunduh komponen yt-dlp otomatis dari {}", url);
+
+    let inspector = core_engine::UrlInspector::new()
+        .map_err(|e| format!("Gagal menginisialisasi inspektor yt-dlp: {}", e))?;
+    let inspect_info = inspector
+        .inspect(url)
+        .await
+        .map_err(|e| format!("Komponen yt-dlp belum terpasang dan gagal diakses ({})", e))?;
+
+    let downloader = core_engine::Downloader::new()
+        .map_err(|e| format!("Gagal menginisialisasi pengunduh yt-dlp: {}", e))?;
+    downloader
+        .download(
+            "ytdlp-bootstrap",
+            &inspect_info.final_url,
+            &tmp_path,
+            inspect_info.file_size,
+            inspect_info.supports_range,
+            4,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            format!(
+                "Komponen yt-dlp belum terpasang dan gagal diunduh otomatis ({}). Pastikan koneksi internet aktif.",
+                e
+            )
+        })?;
+
+    let downloaded_len = std::fs::metadata(&tmp_path).map(|m| m.len()).unwrap_or(0);
+    if downloaded_len < 1_000_000 {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(
+            "Berkas yt-dlp yang diunduh tidak valid atau terpotong. Coba ulangi beberapa saat lagi."
+                .to_string(),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&tmp_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(&tmp_path, perms);
+        }
+    }
+
+    if dest_path.exists() {
+        let _ = std::fs::remove_file(&dest_path);
+    }
+    std::fs::rename(&tmp_path, &dest_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("Gagal menempatkan yt-dlp ke {}: {}", dest_path.display(), e)
+    })?;
+
+    Ok(dest_path.display().to_string())
 }
 
 fn extract_url_host(raw_url: &str) -> String {
@@ -490,8 +656,40 @@ fn is_video_or_stream_url(raw_url: &str) -> bool {
         || lower.contains(".mpd?")
 }
 
+fn sanitize_media_title(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    let mut cleaned = core_engine::inspector::sanitize_filename(trimmed);
+    if cleaned == "download.bin" && !trimmed.eq_ignore_ascii_case("download.bin") {
+        return fallback.to_string();
+    }
+    if cleaned.chars().count() > 160 {
+        cleaned = cleaned.chars().take(160).collect::<String>();
+        cleaned = cleaned.trim().trim_end_matches(['.', ' ']).to_string();
+        if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+            return fallback.to_string();
+        }
+    }
+    cleaned
+}
+
+fn is_direct_manifest_url(raw_url: &str) -> bool {
+    let lower = raw_url.trim().to_ascii_lowercase();
+    let without_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let path_only = without_scheme.split(&['?', '#'][..]).next().unwrap_or("");
+    path_only.ends_with(".m3u8")
+        || path_only.ends_with(".mpd")
+        || lower.contains(".m3u8?")
+        || lower.contains(".mpd?")
+}
+
 #[allow(dead_code)]
-async fn inspect_video_url(url: &str) -> Option<InspectResult> {
+async fn inspect_video_url(url: &str) -> Result<InspectResult, String> {
     inspect_video_url_with_headers(url, None, None, None).await
 }
 
@@ -500,7 +698,7 @@ async fn inspect_video_url_with_headers(
     cookie: Option<&str>,
     referer: Option<&str>,
     user_agent: Option<&str>,
-) -> Option<InspectResult> {
+) -> Result<InspectResult, String> {
     inspect_video_url_with_options(url, cookie, referer, user_agent, None, None, None).await
 }
 
@@ -533,8 +731,9 @@ async fn run_ytdlp_dump_json(
     auth_username: Option<&str>,
     auth_password: Option<&str>,
     timeout_secs: u64,
-) -> Option<serde_json::Value> {
+) -> Result<serde_json::Value, String> {
     let mut cmd = tokio::process::Command::new(bin);
+    hide_window_tokio(&mut cmd);
     let has_js_rt = apply_ytdlp_runtime_env(&mut cmd);
     if force_all_clients || !has_js_rt {
         cmd.arg("--extractor-args").arg("youtube:player_client=all");
@@ -552,22 +751,30 @@ async fn run_ytdlp_dump_json(
         cmd.output(),
     )
     .await
-    .ok()?
-    .ok()?;
+    .map_err(|_| format!("Analisis video (yt-dlp) melebihi batas waktu {} detik.", timeout_secs))?
+    .map_err(|e| format!("Gagal menjalankan yt-dlp ({}): {}", bin, e))?;
 
     if !output.status.success() || output.stdout.is_empty() {
         let err_snippet = String::from_utf8_lossy(&output.stderr);
-        if !err_snippet.trim().is_empty() {
-            log::warn!(
-                "yt-dlp inspect failed for {}: {}",
-                url,
-                err_snippet.lines().last().unwrap_or("")
-            );
-        }
-        return None;
+        let best_line = err_snippet
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| l.starts_with("ERROR:"))
+            .or_else(|| {
+                err_snippet
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty() && !l.starts_with("WARNING:"))
+            })
+            .unwrap_or("Stream video tidak dapat dianalisis oleh yt-dlp.");
+        log::warn!("yt-dlp inspect failed for {}: {}", url, best_line);
+        return Err(best_line.to_string());
     }
 
-    serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .map_err(|e| format!("Metadata yt-dlp tidak valid: {}", e))
 }
 
 async fn inspect_video_url_with_options(
@@ -578,11 +785,11 @@ async fn inspect_video_url_with_options(
     proxy_url: Option<&str>,
     auth_username: Option<&str>,
     auth_password: Option<&str>,
-) -> Option<InspectResult> {
-    let bin = get_ytdlp_bin()?;
+) -> Result<InspectResult, String> {
+    let bin = ensure_ytdlp_bin().await?;
     let is_yt = is_youtube_url(url);
 
-    // Primary fast extraction (uses detected JS runtime e.g. node/deno without forcing slow player_client=all)
+    // Primary extraction (allow generous timeout for Windows PyInstaller/Defender cold start)
     let primary = run_ytdlp_dump_json(
         &bin,
         url,
@@ -593,16 +800,16 @@ async fn inspect_video_url_with_options(
         proxy_url,
         auth_username,
         auth_password,
-        12,
+        22,
     )
     .await;
 
     let json_val = match primary {
-        Some(v) if !is_yt || json_has_playable_video_format(&v) => v,
+        Ok(v) if !is_yt || json_has_playable_video_format(&v) => v,
         fallback_candidate => {
             // Fallback for YouTube session/cookie bot-gate or SABR client mismatch:
             // retry cleanly without browser Cookie header and/or with all clients enabled.
-            let retry_all = !is_yt || fallback_candidate.is_some();
+            let retry_all = !is_yt || fallback_candidate.is_ok();
             let retry = run_ytdlp_dump_json(
                 &bin,
                 url,
@@ -613,40 +820,37 @@ async fn inspect_video_url_with_options(
                 proxy_url,
                 auth_username,
                 auth_password,
-                11,
+                18,
             )
             .await;
 
             match (retry, fallback_candidate) {
-                (Some(r), Some(c)) => {
+                (Ok(r), Ok(c)) => {
                     if json_has_playable_video_format(&r) || !json_has_playable_video_format(&c) {
                         r
                     } else {
                         c
                     }
                 }
-                (Some(r), None) => r,
-                (None, Some(c)) => c,
-                (None, None) => return None,
+                (Ok(r), Err(_)) => r,
+                (Err(_), Ok(c)) => c,
+                (Err(r_err), Err(c_err)) => {
+                    return Err(if !r_err.is_empty() { r_err } else { c_err });
+                }
             }
         }
     };
 
     let raw_title = json_val["title"].as_str().unwrap_or("video");
-    let clean_title: String = raw_title
-        .chars()
-        .filter(|c| !matches!(*c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
-        .collect();
-    let clean_title = if clean_title.trim().is_empty() {
-        "video".to_string()
-    } else {
-        clean_title.trim().to_string()
-    };
+    let clean_title = sanitize_media_title(raw_title, "video");
 
     let duration_seconds = json_val["duration"].as_u64().unwrap_or(0);
     let thumbnail_url = json_val["thumbnail"].as_str().map(|s| s.to_string());
 
-    let formats_array = json_val["formats"].as_array()?;
+    let formats_array = json_val["formats"]
+        .as_array()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| "Daftar format video tidak ditemukan pada tautan ini.".to_string())?;
 
     // 1. Identify best audio stream
     let mut best_audio_size: u64 = 0;
@@ -881,7 +1085,7 @@ async fn inspect_video_url_with_options(
 
     let top_size = video_formats.first().and_then(|f| f.file_size_approx);
 
-    Some(InspectResult {
+    Ok(InspectResult {
         url: url.to_string(),
         final_url: url.to_string(),
         file_name: format!("{}.mp4", clean_title),
@@ -901,15 +1105,25 @@ async fn inspect_video_url_with_options(
 }
 
 fn resolve_path(p: &str) -> PathBuf {
-    if p.starts_with("~/") || p == "~" {
-        if let Some(home) = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)) {
-            if p == "~" {
-                return home;
-            }
-            return home.join(&p[2..]);
+    let trimmed = p.trim();
+    if trimmed == "~" {
+        if let Some(home) = user_home_dir() {
+            return home;
         }
     }
-    PathBuf::from(p)
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix(r#"~\"#))
+    {
+        if let Some(home) = user_home_dir() {
+            let mut out = home;
+            for seg in rest.split(['/', '\\']).filter(|s| !s.is_empty()) {
+                out.push(seg);
+            }
+            return out;
+        }
+    }
+    PathBuf::from(trimmed)
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -1058,11 +1272,38 @@ fn check_file_exists(path: String) -> bool {
     resolved.exists() && resolved.is_file()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn path_to_file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    let mut encoded = String::from("file://");
+    for byte in raw.as_bytes() {
+        let b = *byte;
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~') {
+            encoded.push(b as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{:02X}", b));
+        }
+    }
+    encoded
+}
+
+fn normalize_platform_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        return PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        path
+    }
+}
+
 #[tauri::command]
 fn open_folder(path: String) -> Result<String, String> {
-    let mut target = resolve_path(&path);
+    let mut target = normalize_platform_path(resolve_path(&path));
 
-    // If target has a file extension or is a file, reveal in Finder/Explorer or get parent directory
+    // If target has a file extension or is a file, reveal in Finder/Explorer/File Manager or get parent directory
     if target.is_file() || target.extension().is_some() {
         if target.exists() {
             #[cfg(target_os = "macos")]
@@ -1079,10 +1320,55 @@ fn open_folder(path: String) -> Result<String, String> {
             }
             #[cfg(target_os = "windows")]
             {
-                let _ = std::process::Command::new("explorer")
-                    .arg(format!("/select,\"{}\"", target.display()))
-                    .spawn();
-                return Ok(format!("Membuka berkas di Explorer: {}", target.display()));
+                use std::os::windows::process::CommandExt;
+                let abs = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+                let norm = abs.to_string_lossy().replace('/', "\\");
+                let clean = if let Some(unc) = norm.strip_prefix(r"\\?\UNC\") {
+                    format!(r"\\{}", unc)
+                } else {
+                    norm.strip_prefix(r"\\?\").unwrap_or(&norm).to_string()
+                };
+                if std::process::Command::new("explorer")
+                    .raw_arg(format!("/select,\"{}\"", clean))
+                    .spawn()
+                    .is_ok()
+                {
+                    return Ok(format!("Membuka berkas di Explorer: {}", clean));
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let abs_target = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(&target))
+                        .unwrap_or_else(|_| target.clone())
+                };
+                let uri = path_to_file_uri(&abs_target);
+                if let Ok(output) = std::process::Command::new("dbus-send")
+                    .args([
+                        "--session",
+                        "--dest=org.freedesktop.FileManager1",
+                        "--print-reply",
+                        "--reply-timeout=1500",
+                        "--type=method_call",
+                        "/org/freedesktop/FileManager1",
+                        "org.freedesktop.FileManager1.ShowItems",
+                        &format!("array:string:{}", uri),
+                        "string:",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                {
+                    if output.status.success() {
+                        return Ok(format!(
+                            "Menampilkan berkas di File Manager: {}",
+                            target.display()
+                        ));
+                    }
+                }
             }
         }
         if let Some(parent) = target.parent() {
@@ -1102,7 +1388,7 @@ fn open_folder(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn open_file(path: String) -> Result<String, String> {
-    let target = resolve_path(&path);
+    let target = normalize_platform_path(resolve_path(&path));
 
     if !target.exists() {
         // If file is missing, open parent folder to show where it belongs
@@ -1247,10 +1533,10 @@ async fn start_real_download(
             || format_id.as_deref().map_or(false, |f| !f.trim().is_empty());
 
         if is_video_or_stream {
-            let home_dir = dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default();
-            let ytdlp_bin = get_ytdlp_bin();
+            let ytdlp_res = ensure_ytdlp_bin().await;
+            let mut ytdlp_error_detail: Option<String> = ytdlp_res.as_ref().err().cloned();
 
-            if let Some(bin) = ytdlp_bin {
+            if let Ok(bin) = ytdlp_res {
                 let paused_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let canceled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stop_notify = Arc::new(Notify::new());
@@ -1278,20 +1564,28 @@ async fn start_real_download(
                     None,
                 );
 
-                let is_audio = target.extension().map_or(false, |ext| {
-                    let e = ext.to_string_lossy().to_lowercase();
-                    e == "mp3" || e == "m4a" || e == "flac" || e == "wav"
-                });
+                let target_ext = target
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                let is_audio = matches!(target_ext.as_str(), "mp3" | "m4a" | "flac" | "wav");
+
+                // Locate ffmpeg before selecting streams so progressive fallback works if ffmpeg is absent
+                let ffmpeg_path = find_executable_in_dirs(&["ffmpeg"], &default_tool_dirs());
+                let has_ffmpeg = ffmpeg_path.is_some();
 
                 let tmp_video = if is_audio {
-                    let mut t = target.clone();
-                    t.set_extension("temp_stream.mp4");
-                    t
+                    if target_ext == "m4a" && !has_ffmpeg {
+                        target.with_extension("temp_stream.m4a")
+                    } else {
+                        target.with_extension("temp_stream.mp4")
+                    }
                 } else {
                     target.clone()
                 };
 
                 let mut cmd = tokio::process::Command::new(&bin);
+                hide_window_tokio(&mut cmd);
                 let has_js_rt = apply_ytdlp_runtime_env(&mut cmd);
                 if !has_js_rt {
                     cmd.arg("--extractor-args").arg("youtube:player_client=all");
@@ -1317,174 +1611,377 @@ async fn start_real_download(
                     auth_password.as_deref(),
                 );
 
-                // Locate ffmpeg for multi-stream video + audio merging
-                if let Some(ffmpeg_path) = find_executable_in_dirs(&["ffmpeg"], &default_tool_dirs()) {
-                    if let Some(ffmpeg_dir) = ffmpeg_path.parent() {
+                if let Some(ref ff_path) = ffmpeg_path {
+                    if let Some(ffmpeg_dir) = ff_path.parent() {
                         cmd.arg("--ffmpeg-location").arg(ffmpeg_dir);
                     }
                 }
+
+                let parse_height_selector = |h: u32| -> String {
+                    if has_ffmpeg {
+                        format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+                    } else {
+                        format!("best[height<={h}][ext=mp4]/best[height<={h}]/best")
+                    }
+                };
+                let default_video_selector = if has_ffmpeg {
+                    "bestvideo+bestaudio/best".to_string()
+                } else {
+                    "best[ext=mp4]/best".to_string()
+                };
+                let default_m4a_selector = if has_ffmpeg {
+                    "bestaudio[ext=m4a]/bestaudio/18/best".to_string()
+                } else {
+                    "bestaudio[ext=m4a]/best[ext=m4a]/bestaudio/18/best".to_string()
+                };
 
                 let fmt_selector = if let Some(fid) = format_id.as_deref() {
                     if fid == "audio_mp3" {
                         "bestaudio/18/best".to_string()
                     } else if fid == "audio_m4a" {
-                        "bestaudio[ext=m4a]/bestaudio/18/best".to_string()
+                        default_m4a_selector.clone()
                     } else if let Some(h_str) = fid.strip_suffix("p_mp4") {
                         if let Ok(h) = h_str.parse::<u32>() {
-                            format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+                            parse_height_selector(h)
                         } else {
-                            "bestvideo+bestaudio/best".to_string()
+                            default_video_selector.clone()
                         }
                     } else if let Some(h_str) = fid.strip_suffix('p') {
                         if let Ok(h) = h_str.parse::<u32>() {
-                            format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+                            parse_height_selector(h)
                         } else {
-                            "bestvideo+bestaudio/best".to_string()
+                            default_video_selector.clone()
+                        }
+                    } else if is_audio {
+                        if target_ext == "m4a" {
+                            default_m4a_selector.clone()
+                        } else {
+                            "bestaudio/18/best".to_string()
                         }
                     } else {
-                        if is_audio {
-                            "bestaudio/18/best".to_string()
-                        } else {
-                            "bestvideo+bestaudio/best".to_string()
-                        }
+                        default_video_selector.clone()
                     }
                 } else if is_audio {
-                    "bestaudio/18/best".to_string()
+                    if target_ext == "m4a" {
+                        default_m4a_selector
+                    } else {
+                        "bestaudio/18/best".to_string()
+                    }
                 } else {
-                    "bestvideo+bestaudio/best".to_string()
+                    default_video_selector
                 };
 
                 cmd.arg("-f").arg(&fmt_selector);
-                if !is_audio {
+                if !is_audio && has_ffmpeg {
                     cmd.arg("--merge-output-format").arg("mp4");
                 }
                 cmd.arg("-o").arg(&tmp_video);
                 cmd.arg(&url);
                 cmd.stdout(std::process::Stdio::piped());
-                cmd.stderr(std::process::Stdio::null()); // DO NOT PIPE STDERR TO AVOID DEADLOCK
+                cmd.stderr(std::process::Stdio::piped());
 
-                if let Ok(mut child) = cmd.spawn() {
-                    let stdout = child.stdout.take();
-                    let app_for_lines = app.clone();
-                    let tid_for_lines = task_id.clone();
-                    let target_for_lines = target.clone();
+                match cmd.spawn() {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take();
+                        let stderr = child.stderr.take();
+                        let app_for_lines = app.clone();
+                        let tid_for_lines = task_id.clone();
+                        let target_for_lines = target.clone();
 
-                    // Read progress lines asynchronously from yt-dlp stdout
-                    let line_task = tokio::spawn(async move {
-                        if let Some(out) = stdout {
-                            use tokio::io::AsyncBufReadExt;
-                            let mut reader = tokio::io::BufReader::new(out).lines();
-                            while let Ok(Some(line)) = reader.next_line().await {
-                                if let Some((pct, dl_bytes, total_bytes, speed_bps, eta)) = parse_ytdlp_progress_line(&line) {
-                                    let scaled_pct = (pct * 0.9).min(90.0);
-                                    emit_simple_telemetry(
-                                        &app_for_lines,
-                                        &tid_for_lines,
-                                        dl_bytes,
-                                        total_bytes,
-                                        speed_bps,
-                                        scaled_pct,
-                                        eta,
-                                        "downloading",
-                                        &target_for_lines,
-                                        None,
-                                    );
+                        // Read progress lines asynchronously from yt-dlp stdout
+                        let line_task = tokio::spawn(async move {
+                            if let Some(out) = stdout {
+                                use tokio::io::AsyncBufReadExt;
+                                let mut reader = tokio::io::BufReader::new(out).lines();
+                                while let Ok(Some(line)) = reader.next_line().await {
+                                    if let Some((pct, dl_bytes, total_bytes, speed_bps, eta)) =
+                                        parse_ytdlp_progress_line(&line)
+                                    {
+                                        let scaled_pct = (pct * 0.9).min(90.0);
+                                        emit_simple_telemetry(
+                                            &app_for_lines,
+                                            &tid_for_lines,
+                                            dl_bytes,
+                                            total_bytes,
+                                            speed_bps,
+                                            scaled_pct,
+                                            eta,
+                                            "downloading",
+                                            &target_for_lines,
+                                            None,
+                                        );
+                                    }
                                 }
                             }
+                        });
+
+                        // Drain stderr concurrently so yt-dlp cannot block and real error text is captured
+                        let err_task = tokio::spawn(async move {
+                            let mut last_explicit_err: Option<String> = None;
+                            let mut last_other_line: Option<String> = None;
+                            if let Some(err_stream) = stderr {
+                                use tokio::io::AsyncBufReadExt;
+                                let mut reader = tokio::io::BufReader::new(err_stream).lines();
+                                while let Ok(Some(line)) = reader.next_line().await {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with("ERROR:") {
+                                        last_explicit_err = Some(trimmed.to_string());
+                                    } else if !trimmed.is_empty() && !trimmed.starts_with("WARNING:") {
+                                        last_other_line = Some(trimmed.to_string());
+                                    }
+                                }
+                            }
+                            last_explicit_err.or(last_other_line)
+                        });
+
+                        let status = tokio::select! {
+                            res = child.wait() => Some(res),
+                            _ = stop_notify.notified() => {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                None
+                            }
+                        };
+                        let _ = line_task.await;
+                        if let Ok(Some(err_msg)) = err_task.await {
+                            ytdlp_error_detail = Some(err_msg);
                         }
-                    });
+                        unregister_active_download(&task_id);
 
-                    let status = tokio::select! {
-                        res = child.wait() => Some(res),
-                        _ = stop_notify.notified() => {
-                            let _ = child.kill().await;
-                            let _ = child.wait().await;
-                            None
+                        if canceled_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            remove_task_target(&task_id);
+                            cleanup_download_artifacts(&target);
+                            emit_simple_telemetry(
+                                &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                            );
+                            return;
                         }
-                    };
-                    let _ = line_task.await;
-                    unregister_active_download(&task_id);
 
-                    if canceled_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                        remove_task_target(&task_id);
-                        cleanup_download_artifacts(&target);
-                        emit_simple_telemetry(&app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None);
-                        return;
-                    }
+                        if paused_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            emit_simple_telemetry(
+                                &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+                            );
+                            return;
+                        }
 
-                    if paused_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                        emit_simple_telemetry(&app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None);
-                        return;
-                    }
+                        if let Some(Ok(s)) = status {
+                            if s.success() {
+                                if is_audio {
+                                    // Telemetry for audio conversion phase
+                                    emit_simple_telemetry(
+                                        &app,
+                                        &task_id,
+                                        9_500_000,
+                                        10_000_000,
+                                        500_000,
+                                        95.0,
+                                        Some(2),
+                                        "downloading",
+                                        &target,
+                                        None,
+                                    );
 
-                    if let Some(Ok(s)) = status {
-                        if s.success() {
-                            if is_audio {
-                                // Telemetry for audio conversion phase
+                                    let mut converted = false;
+                                    if let Some(home) = user_home_dir() {
+                                        let converter_script =
+                                            home.join(".download-cepat").join("bin").join("converter.py");
+                                        let venv_dir = home.join(".download-cepat").join("venv");
+                                        let python_candidates = [
+                                            venv_dir.join("bin").join("python3"),
+                                            venv_dir.join("Scripts").join("python.exe"),
+                                        ];
+                                        let python_bin = python_candidates
+                                            .into_iter()
+                                            .find(|p| p.is_file())
+                                            .or_else(|| {
+                                                find_executable_in_dirs(
+                                                    &["python3", "python"],
+                                                    &default_tool_dirs(),
+                                                )
+                                            });
+
+                                        if converter_script.is_file() {
+                                            if let Some(py) = python_bin {
+                                                let mut conv_cmd = tokio::process::Command::new(&py);
+                                                hide_window_tokio(&mut conv_cmd);
+                                                conv_cmd
+                                                    .arg(&converter_script)
+                                                    .arg(&tmp_video)
+                                                    .arg(&target)
+                                                    .stdout(std::process::Stdio::null())
+                                                    .stderr(std::process::Stdio::null());
+                                                if let Ok(c_status) = conv_cmd.status().await {
+                                                    if c_status.success() {
+                                                        converted = std::fs::metadata(&target)
+                                                            .map(|m| m.is_file() && m.len() > 0)
+                                                            .unwrap_or(false);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if !converted {
+                                        if let Some(ref ff_path) = ffmpeg_path {
+                                            let mut ff_cmd = tokio::process::Command::new(ff_path);
+                                            hide_window_tokio(&mut ff_cmd);
+                                            ff_cmd.arg("-y").arg("-i").arg(&tmp_video).arg("-vn");
+                                            match target_ext.as_str() {
+                                                "mp3" => {
+                                                    ff_cmd.args(["-c:a", "libmp3lame", "-b:a", "256k"]);
+                                                }
+                                                "m4a" => {
+                                                    ff_cmd.args([
+                                                        "-c:a",
+                                                        "aac",
+                                                        "-b:a",
+                                                        "256k",
+                                                        "-movflags",
+                                                        "+faststart",
+                                                    ]);
+                                                }
+                                                "flac" => {
+                                                    ff_cmd.args(["-c:a", "flac"]);
+                                                }
+                                                "wav" => {
+                                                    ff_cmd.args(["-c:a", "pcm_s16le"]);
+                                                }
+                                                _ => {}
+                                            }
+                                            ff_cmd
+                                                .arg(&target)
+                                                .stdout(std::process::Stdio::null())
+                                                .stderr(std::process::Stdio::null());
+                                            if let Ok(ff_status) = ff_cmd.status().await {
+                                                if ff_status.success() {
+                                                    converted = std::fs::metadata(&target)
+                                                        .map(|m| m.is_file() && m.len() > 0)
+                                                        .unwrap_or(false);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if !converted {
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            let mut m4a_path = target.clone();
+                                            m4a_path.set_extension("m4a");
+                                            let _ = tokio::process::Command::new("afconvert")
+                                                .arg("-f")
+                                                .arg("m4af")
+                                                .arg("-d")
+                                                .arg("aac")
+                                                .arg(&tmp_video)
+                                                .arg(&m4a_path)
+                                                .stdout(std::process::Stdio::null())
+                                                .stderr(std::process::Stdio::null())
+                                                .status()
+                                                .await;
+
+                                            if target != m4a_path && !target.exists() && m4a_path.exists() {
+                                                let _ = std::fs::copy(&m4a_path, &target);
+                                            }
+                                            if std::fs::metadata(&target)
+                                                .map(|m| m.is_file() && m.len() > 0)
+                                                .unwrap_or(false)
+                                            {
+                                                converted = true;
+                                            }
+                                        }
+                                    }
+
+                                    if !converted && target_ext == "m4a" && tmp_video.is_file() {
+                                        let is_isobmff = std::fs::File::open(&tmp_video)
+                                            .and_then(|mut f| {
+                                                use std::io::Read;
+                                                let mut hdr = [0u8; 12];
+                                                f.read_exact(&mut hdr).map(|_| &hdr[4..8] == b"ftyp")
+                                            })
+                                            .unwrap_or(false);
+                                        if is_isobmff
+                                            && move_file_cross_device(&tmp_video, &target).is_ok()
+                                        {
+                                            converted = std::fs::metadata(&target)
+                                                .map(|m| m.is_file() && m.len() > 0)
+                                                .unwrap_or(false);
+                                        }
+                                    }
+
+                                    let _ = std::fs::remove_file(&tmp_video);
+
+                                    if !converted {
+                                        remove_task_target(&task_id);
+                                        emit_simple_telemetry(
+                                            &app,
+                                            &task_id,
+                                            0,
+                                            0,
+                                            0,
+                                            0.0,
+                                            None,
+                                            "error",
+                                            &target,
+                                            Some(format!(
+                                                "Gagal mengonversi audio ke .{}. Pasang FFmpeg di sistem agar konversi audio (MP3/M4A) dapat berjalan.",
+                                                target_ext
+                                            )),
+                                        );
+                                        return;
+                                    }
+                                }
+
+                                let file_len = std::fs::metadata(&target)
+                                    .ok()
+                                    .filter(|m| m.is_file())
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                remove_task_target(&task_id);
+                                if file_len == 0 {
+                                    emit_simple_telemetry(
+                                        &app,
+                                        &task_id,
+                                        0,
+                                        0,
+                                        0,
+                                        0.0,
+                                        None,
+                                        "error",
+                                        &target,
+                                        Some(
+                                            "Berkas hasil unduhan video/audio kosong atau tidak tersimpan ke disk."
+                                                .to_string(),
+                                        ),
+                                    );
+                                    return;
+                                }
                                 emit_simple_telemetry(
                                     &app,
                                     &task_id,
-                                    9_500_000,
-                                    10_000_000,
-                                    500_000,
-                                    95.0,
-                                    Some(2),
-                                    "downloading",
+                                    file_len,
+                                    file_len,
+                                    0,
+                                    100.0,
+                                    Some(0),
+                                    "completed",
                                     &target,
                                     None,
                                 );
-
-                                let converter_script = format!("{}/.download-cepat/bin/converter.py", home_dir);
-                                let python_bin = format!("{}/.download-cepat/venv/bin/python3", home_dir);
-
-                                let mut converted = false;
-                                if std::path::Path::new(&converter_script).exists() && std::path::Path::new(&python_bin).exists() {
-                                    let conv_res = tokio::process::Command::new(&python_bin)
-                                        .arg(&converter_script)
-                                        .arg(&tmp_video)
-                                        .arg(&target)
-                                        .status()
-                                        .await;
-                                    if let Ok(c_status) = conv_res {
-                                        if c_status.success() && target.exists() {
-                                            converted = true;
-                                        }
-                                    }
-                                }
-
-                                if !converted {
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let mut m4a_path = target.clone();
-                                        m4a_path.set_extension("m4a");
-                                        let _ = tokio::process::Command::new("afconvert")
-                                            .arg("-f").arg("m4af")
-                                            .arg("-d").arg("aac")
-                                            .arg(&tmp_video)
-                                            .arg(&m4a_path)
-                                            .status().await;
-
-                                        if target != m4a_path && !target.exists() && m4a_path.exists() {
-                                            let _ = std::fs::copy(&m4a_path, &target);
-                                        }
-                                    }
-                                }
-
-                                let _ = std::fs::remove_file(&tmp_video);
+                                return;
                             }
-
-                            remove_task_target(&task_id);
-                            let file_len = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
-                            emit_simple_telemetry(&app, &task_id, file_len, file_len, 0, 100.0, Some(0), "completed", &target, None);
-                            return;
                         }
+                    }
+                    Err(e) => {
+                        ytdlp_error_detail = Some(format!("Gagal menjalankan yt-dlp: {}", e));
+                        unregister_active_download(&task_id);
                     }
                 }
             }
 
+            remove_task_target(&task_id);
             unregister_active_download(&task_id);
 
-            // Emitted if video stream extraction failed
+            // Emitted if video stream extraction or provisioning failed
             emit_simple_telemetry(
                 &app,
                 &task_id,
@@ -1495,7 +1992,9 @@ async fn start_real_download(
                 None,
                 "error",
                 &target,
-                Some("Gagal memproses stream video/audio. Pastikan link dapat diakses.".to_string()),
+                Some(ytdlp_error_detail.unwrap_or_else(|| {
+                    "Gagal memproses stream video/audio. Pastikan link dapat diakses.".to_string()
+                })),
             );
             return;
         }
@@ -1757,7 +2256,7 @@ async fn inspect_url(
     auth_password: Option<String>,
 ) -> Result<core_engine::model::InspectResult, String> {
     if is_video_or_stream_url(&url) {
-        if let Some(res) = inspect_video_url_with_options(
+        match inspect_video_url_with_options(
             &url,
             cookie.as_deref(),
             referer.as_deref(),
@@ -1768,7 +2267,12 @@ async fn inspect_url(
         )
         .await
         {
-            return Ok(res);
+            Ok(res) => return Ok(res),
+            Err(err) => {
+                if !is_direct_manifest_url(&url) {
+                    return Err(err);
+                }
+            }
         }
     }
 
@@ -1935,7 +2439,100 @@ async fn read_clipboard_text() -> Result<String, String> {
         .await
         .map_err(|e| format!("Task clipboard gagal: {}", e))?;
     }
-    #[allow(unreachable_code)]
+
+    #[cfg(target_os = "windows")]
+    {
+        return tokio::task::spawn_blocking(|| {
+            const CF_UNICODETEXT: u32 = 13;
+            #[link(name = "user32")]
+            extern "system" {
+                fn OpenClipboard(hwnd_new_owner: *mut core::ffi::c_void) -> i32;
+                fn CloseClipboard() -> i32;
+                fn GetClipboardData(u_format: u32) -> *mut core::ffi::c_void;
+            }
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GlobalLock(hmem: *mut core::ffi::c_void) -> *mut u16;
+                fn GlobalUnlock(hmem: *mut core::ffi::c_void) -> i32;
+                fn GlobalSize(hmem: *mut core::ffi::c_void) -> usize;
+            }
+            struct ClipboardGuard;
+            impl Drop for ClipboardGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        CloseClipboard();
+                    }
+                }
+            }
+            struct GlobalLockGuard(*mut core::ffi::c_void);
+            impl Drop for GlobalLockGuard {
+                fn drop(&mut self) {
+                    unsafe {
+                        GlobalUnlock(self.0);
+                    }
+                }
+            }
+
+            unsafe {
+                let mut opened = false;
+                for _ in 0..5 {
+                    if OpenClipboard(std::ptr::null_mut()) != 0 {
+                        opened = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                }
+                if !opened {
+                    return Ok(String::new());
+                }
+                let _clip_guard = ClipboardGuard;
+                let handle = GetClipboardData(CF_UNICODETEXT);
+                if handle.is_null() {
+                    return Ok(String::new());
+                }
+                let max_units = GlobalSize(handle) / 2;
+                if max_units == 0 {
+                    return Ok(String::new());
+                }
+                let ptr = GlobalLock(handle);
+                if ptr.is_null() {
+                    return Ok(String::new());
+                }
+                let _lock_guard = GlobalLockGuard(handle);
+                let slice = std::slice::from_raw_parts(ptr, max_units);
+                let end = slice.iter().position(|&c| c == 0).unwrap_or(max_units);
+                Ok(String::from_utf16_lossy(&slice[..end]).trim().to_string())
+            }
+        })
+        .await
+        .map_err(|e| format!("Task clipboard gagal: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return tokio::task::spawn_blocking(|| {
+            let candidates: [(&str, &[&str]); 3] = [
+                ("wl-paste", &["--no-newline"]),
+                ("xclip", &["-o", "-selection", "clipboard"]),
+                ("xsel", &["--clipboard", "--output"]),
+            ];
+            for (bin, args) in candidates {
+                if let Ok(output) = std::process::Command::new(bin).args(args).output() {
+                    if output.status.success() {
+                        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !text.is_empty() {
+                            return Ok(text);
+                        }
+                    }
+                }
+            }
+            Ok(String::new())
+        })
+        .await
+        .map_err(|e| format!("Task clipboard gagal: {}", e))?;
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     Ok(String::new())
 }
 
@@ -1961,6 +2558,59 @@ fn run_post_download_action(app: tauri::AppHandle, action: String) -> Result<Str
             {
                 let _ = std::process::Command::new("pmset").arg("sleepnow").spawn();
             }
+            #[cfg(target_os = "windows")]
+            {
+                #[link(name = "kernel32")]
+                extern "system" {
+                    fn LoadLibraryA(lp_lib_file_name: *const u8) -> *mut core::ffi::c_void;
+                    fn GetProcAddress(
+                        h_module: *mut core::ffi::c_void,
+                        lp_proc_name: *const u8,
+                    ) -> *mut core::ffi::c_void;
+                }
+                type SetSuspendStateFn = unsafe extern "system" fn(u8, u8, u8) -> u8;
+                unsafe {
+                    let module = LoadLibraryA(b"powrprof.dll\0".as_ptr());
+                    if module.is_null() {
+                        return Err("Gagal memuat powrprof.dll untuk aksi sleep.".to_string());
+                    }
+                    let proc = GetProcAddress(module, b"SetSuspendState\0".as_ptr());
+                    if proc.is_null() {
+                        return Err("Fungsi SetSuspendState tidak tersedia di sistem ini.".to_string());
+                    }
+                    let proc_addr = proc as usize;
+                    std::thread::spawn(move || {
+                        let set_suspend: SetSuspendStateFn = std::mem::transmute::<
+                            *const core::ffi::c_void,
+                            SetSuspendStateFn,
+                        >(proc_addr as *const core::ffi::c_void);
+                        let _ = set_suspend(0, 0, 0);
+                    });
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let mut slept = false;
+                for cmd_name in ["systemctl", "loginctl"] {
+                    if let Ok(output) = std::process::Command::new(cmd_name)
+                        .arg("suspend")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .output()
+                    {
+                        if output.status.success() {
+                            slept = true;
+                            break;
+                        }
+                    }
+                }
+                if !slept {
+                    return Err(
+                        "Gagal mengaktifkan mode sleep (systemctl/loginctl suspend tidak tersedia)."
+                            .to_string(),
+                    );
+                }
+            }
             Ok("sleep".to_string())
         }
         "quit" => {
@@ -1971,15 +2621,80 @@ fn run_post_download_action(app: tauri::AppHandle, action: String) -> Result<Str
     }
 }
 
+fn resolve_app_executable_path() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
+        if appimage.is_file() {
+            return Some(appimage);
+        }
+    }
+    std::env::current_exe().ok().filter(|p| p.exists())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn escape_desktop_exec_arg(arg: &str) -> String {
+    let mut escaped = String::with_capacity(arg.len() + 4);
+    for ch in arg.chars() {
+        match ch {
+            '\\' => escaped.push_str(r"\\"),
+            '"' => escaped.push_str(r#"\""#),
+            '$' => escaped.push_str(r"\$"),
+            '`' => escaped.push_str(r"\`"),
+            '%' => escaped.push_str("%%"),
+            other => escaped.push(other),
+        }
+    }
+    format!("\"{}\"", escaped)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn build_linux_autostart_desktop_entry(exec_path: &str) -> String {
+    format!(
+        "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Download Cepat\nComment=Pengelola Unduhan Multi-Utas Cepat\nExec={}\nIcon=download-cepat\nTerminal=false\nCategories=Network;FileTransfer;\nX-GNOME-Autostart-enabled=true\n",
+        escape_desktop_exec_arg(exec_path)
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_autostart_desktop_path() -> Option<PathBuf> {
+    let config_dir = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| user_home_dir().map(|h| h.join(".config")))?;
+    Some(config_dir.join("autostart").join("download-cepat.desktop"))
+}
+
 #[tauri::command]
 fn get_autostart_status() -> bool {
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = user_home_dir() {
             let plist = home.join("Library/LaunchAgents/com.moesstudio.downloadcepat.plist");
             return plist.exists();
         }
+        return false;
     }
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("reg");
+        hide_window_std(&mut cmd);
+        let status = cmd
+            .args([
+                "query",
+                r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#,
+                "/v",
+                "Download Cepat",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        return status.map(|s| s.success()).unwrap_or(false);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return linux_autostart_desktop_path().map_or(false, |p| p.is_file());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     false
 }
 
@@ -1987,7 +2702,7 @@ fn get_autostart_status() -> bool {
 fn set_autostart(enable: bool) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = user_home_dir() {
             let launch_dir = home.join("Library/LaunchAgents");
             let plist = launch_dir.join("com.moesstudio.downloadcepat.plist");
 
@@ -2036,8 +2751,78 @@ fn set_autostart(enable: bool) -> Result<bool, String> {
                 return Ok(false);
             }
         }
+        return Ok(false);
     }
-    Ok(false)
+
+    #[cfg(target_os = "windows")]
+    {
+        const RUN_KEY: &str = r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#;
+        if enable {
+            let exe = resolve_app_executable_path()
+                .ok_or_else(|| "Gagal mendeteksi lokasi aplikasi Download Cepat.".to_string())?;
+            let value = format!("\"{}\"", normalize_platform_path(exe).display());
+            let mut cmd = std::process::Command::new("reg");
+            hide_window_std(&mut cmd);
+            let status = cmd
+                .args([
+                    "add",
+                    RUN_KEY,
+                    "/v",
+                    "Download Cepat",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &value,
+                    "/f",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_err(|e| format!("Gagal mengatur startup Windows: {}", e))?;
+            if status.success() {
+                return Ok(true);
+            }
+            return Err("Gagal menyimpan entri startup di Windows Registry.".to_string());
+        } else {
+            let mut cmd = std::process::Command::new("reg");
+            hide_window_std(&mut cmd);
+            let _ = cmd
+                .args(["delete", RUN_KEY, "/v", "Download Cepat", "/f"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            return Ok(false);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop_path = linux_autostart_desktop_path()
+            .ok_or_else(|| "Gagal mendeteksi direktori ~/.config/autostart".to_string())?;
+        if enable {
+            if let Some(parent) = desktop_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Gagal membuat folder autostart: {}", e))?;
+            }
+            let exe = resolve_app_executable_path()
+                .ok_or_else(|| "Gagal mendeteksi lokasi aplikasi Download Cepat.".to_string())?;
+            let content = build_linux_autostart_desktop_entry(&exe.display().to_string());
+            std::fs::write(&desktop_path, content)
+                .map_err(|e| format!("Gagal menulis berkas autostart: {}", e))?;
+            return Ok(true);
+        } else {
+            if desktop_path.exists() {
+                let _ = std::fs::remove_file(&desktop_path);
+            }
+            return Ok(false);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        let _ = enable;
+        Ok(false)
+    }
 }
 
 pub const OFFICIAL_CHROME_EXTENSION_ID: &str = "lmahadjehdfibjjgcnbajbgapbkghida";
@@ -2100,13 +2885,53 @@ fn collect_installed_extension_ids(home: &std::path::Path) -> Vec<String> {
         ids.insert((*id).to_string());
     }
 
-    let browser_roots = [
-        home.join("Library/Application Support/Google/Chrome"),
-        home.join("Library/Application Support/Microsoft Edge"),
-        home.join("Library/Application Support/BraveSoftware/Brave-Browser"),
-        home.join("Library/Application Support/Chromium"),
-        home.join("Library/Application Support/Vivaldi"),
-    ];
+    let mut browser_roots: Vec<PathBuf> = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+        browser_roots.extend([
+            home.join("Library/Application Support/Google/Chrome"),
+            home.join("Library/Application Support/Microsoft Edge"),
+            home.join("Library/Application Support/BraveSoftware/Brave-Browser"),
+            home.join("Library/Application Support/Chromium"),
+            home.join("Library/Application Support/Vivaldi"),
+        ]);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local_app = std::env::var_os("LOCALAPPDATA")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Local"));
+        browser_roots.extend([
+            local_app.join(r"Google\Chrome\User Data"),
+            local_app.join(r"Microsoft\Edge\User Data"),
+            local_app.join(r"BraveSoftware\Brave-Browser\User Data"),
+            local_app.join(r"Chromium\User Data"),
+            local_app.join(r"Vivaldi\User Data"),
+        ]);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let cfg = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        browser_roots.extend([
+            cfg.join("google-chrome"),
+            cfg.join("chromium"),
+            cfg.join("BraveSoftware/Brave-Browser"),
+            cfg.join("microsoft-edge"),
+            cfg.join("vivaldi"),
+            home.join(".var/app/com.google.Chrome/config/google-chrome"),
+            home.join(".var/app/org.chromium.Chromium/config/chromium"),
+            home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+            home.join(".var/app/com.microsoft.Edge/config/microsoft-edge"),
+            home.join("snap/chromium/current/.config/chromium"),
+            home.join("snap/brave/current/.config/BraveSoftware/Brave-Browser"),
+        ]);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let _ = home;
 
     for root in &browser_roots {
         let Ok(entries) = std::fs::read_dir(root) else {
@@ -2126,16 +2951,25 @@ fn collect_installed_extension_ids(home: &std::path::Path) -> Vec<String> {
 }
 
 fn resolve_native_host_binary_path() -> String {
-    let mac_installed = std::path::Path::new("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app");
-    if mac_installed.exists() {
-        return mac_installed.display().to_string();
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if exe.exists() {
-            return exe.display().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        let mac_installed =
+            std::path::Path::new("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app");
+        if mac_installed.exists() {
+            return mac_installed.display().to_string();
         }
     }
-    mac_installed.display().to_string()
+    if let Some(exe) = resolve_app_executable_path() {
+        return normalize_platform_path(exe).display().to_string();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return "/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app".to_string();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "download-cepat-app".to_string()
+    }
 }
 
 fn build_chromium_manifest_json(host_path: &str, ext_ids: &[String]) -> String {
@@ -2165,10 +2999,10 @@ fn build_firefox_manifest_json(host_path: &str) -> String {
     .unwrap_or_default()
 }
 
-/// Configures Chrome, Edge, and Brave External Extensions to detect and prompt
+/// Configures Chrome, Edge, Brave, Chromium, and Vivaldi External Extensions to detect and prompt
 /// users to enable Download Cepat directly from the Chrome Web Store on browser startup.
 pub fn sync_external_extensions() -> usize {
-    let Some(home) = dirs::home_dir() else { return 0 };
+    let Some(home) = user_home_dir() else { return 0 };
     let json_content = serde_json::to_string_pretty(&serde_json::json!({
         "external_update_url": "https://clients2.google.com/service/update2/crx"
     }))
@@ -2197,14 +3031,36 @@ pub fn sync_external_extensions() -> usize {
 
     #[cfg(target_os = "linux")]
     {
-        let dirs = [
-            home.join(".config/google-chrome/External Extensions"),
-            home.join(".config/chromium/External Extensions"),
-            home.join(".config/BraveSoftware/Brave-Browser/External Extensions"),
-            home.join(".config/microsoft-edge/External Extensions"),
+        let cfg = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
+        let standard_dirs = [
+            cfg.join("google-chrome/External Extensions"),
+            cfg.join("chromium/External Extensions"),
+            cfg.join("BraveSoftware/Brave-Browser/External Extensions"),
+            cfg.join("microsoft-edge/External Extensions"),
+            cfg.join("vivaldi/External Extensions"),
         ];
-        for d in &dirs {
+        for d in &standard_dirs {
             if std::fs::create_dir_all(d).is_ok() {
+                let file_path = d.join(format!("{}.json", OFFICIAL_CHROME_EXTENSION_ID));
+                if std::fs::write(&file_path, &json_content).is_ok() {
+                    configured += 1;
+                }
+            }
+        }
+
+        let sandbox_dirs = [
+            home.join(".var/app/com.google.Chrome/config/google-chrome/External Extensions"),
+            home.join(".var/app/org.chromium.Chromium/config/chromium/External Extensions"),
+            home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/External Extensions"),
+            home.join(".var/app/com.microsoft.Edge/config/microsoft-edge/External Extensions"),
+            home.join("snap/chromium/current/.config/chromium/External Extensions"),
+            home.join("snap/brave/current/.config/BraveSoftware/Brave-Browser/External Extensions"),
+        ];
+        for d in &sandbox_dirs {
+            if d.parent().map_or(false, |p| p.exists()) && std::fs::create_dir_all(d).is_ok() {
                 let file_path = d.join(format!("{}.json", OFFICIAL_CHROME_EXTENSION_ID));
                 if std::fs::write(&file_path, &json_content).is_ok() {
                     configured += 1;
@@ -2221,10 +3077,16 @@ pub fn sync_external_extensions() -> usize {
             format!(r#"HKCU\Software\Google\Chrome\Extensions\{}"#, ext_id),
             format!(r#"HKCU\Software\Microsoft\Edge\Extensions\{}"#, ext_id),
             format!(r#"HKCU\Software\BraveSoftware\Brave-Browser\Extensions\{}"#, ext_id),
+            format!(r#"HKCU\Software\Chromium\Extensions\{}"#, ext_id),
+            format!(r#"HKCU\Software\Vivaldi\Extensions\{}"#, ext_id),
         ];
         for path in &reg_paths {
-            let status = std::process::Command::new("reg")
+            let mut cmd = std::process::Command::new("reg");
+            hide_window_std(&mut cmd);
+            let status = cmd
                 .args(["add", path, "/v", "update_url", "/t", "REG_SZ", "/d", update_url, "/f"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
             if status.map_or(false, |s| s.success()) {
                 configured += 1;
@@ -2235,9 +3097,9 @@ pub fn sync_external_extensions() -> usize {
     configured
 }
 
-/// Writes valid Native Messaging host manifests for Chrome, Edge, Brave, and Firefox across macOS, Windows, and Linux.
+/// Writes valid Native Messaging host manifests for Chrome, Edge, Brave, Chromium, Vivaldi, and Firefox across macOS, Windows, and Linux.
 pub fn sync_native_messaging_hosts() -> Result<usize, String> {
-    let home = dirs::home_dir().ok_or("Gagal mendeteksi direktori home")?;
+    let home = user_home_dir().ok_or("Gagal mendeteksi direktori home")?;
     let host_path = resolve_native_host_binary_path();
     let ext_ids = collect_installed_extension_ids(&home);
     let chromium_manifest = build_chromium_manifest_json(&host_path, &ext_ids);
@@ -2275,15 +3137,37 @@ pub fn sync_native_messaging_hosts() -> Result<usize, String> {
 
     #[cfg(target_os = "linux")]
     {
+        let cfg = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"));
         let chromium_dirs = [
-            home.join(".config/google-chrome/NativeMessagingHosts"),
-            home.join(".config/chromium/NativeMessagingHosts"),
-            home.join(".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
-            home.join(".config/microsoft-edge/NativeMessagingHosts"),
+            cfg.join("google-chrome/NativeMessagingHosts"),
+            cfg.join("chromium/NativeMessagingHosts"),
+            cfg.join("BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            cfg.join("microsoft-edge/NativeMessagingHosts"),
+            cfg.join("vivaldi/NativeMessagingHosts"),
         ];
 
         for dir in &chromium_dirs {
             if std::fs::create_dir_all(dir).is_ok() {
+                let manifest_path = dir.join("com.downloadcepat.nativehost.json");
+                if std::fs::write(&manifest_path, &chromium_manifest).is_ok() {
+                    installed_count += 1;
+                }
+            }
+        }
+
+        let sandbox_chromium_dirs = [
+            home.join(".var/app/com.google.Chrome/config/google-chrome/NativeMessagingHosts"),
+            home.join(".var/app/org.chromium.Chromium/config/chromium/NativeMessagingHosts"),
+            home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+            home.join(".var/app/com.microsoft.Edge/config/microsoft-edge/NativeMessagingHosts"),
+            home.join("snap/chromium/current/.config/chromium/NativeMessagingHosts"),
+            home.join("snap/brave/current/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+        ];
+        for dir in &sandbox_chromium_dirs {
+            if dir.parent().map_or(false, |p| p.exists()) && std::fs::create_dir_all(dir).is_ok() {
                 let manifest_path = dir.join("com.downloadcepat.nativehost.json");
                 if std::fs::write(&manifest_path, &chromium_manifest).is_ok() {
                     installed_count += 1;
@@ -2298,29 +3182,74 @@ pub fn sync_native_messaging_hosts() -> Result<usize, String> {
                 installed_count += 1;
             }
         }
+
+        let sandbox_mozilla_dirs = [
+            home.join(".var/app/org.mozilla.firefox/.mozilla/native-messaging-hosts"),
+            home.join("snap/firefox/common/.mozilla/native-messaging-hosts"),
+        ];
+        for dir in &sandbox_mozilla_dirs {
+            if dir.parent().map_or(false, |p| p.exists()) && std::fs::create_dir_all(dir).is_ok() {
+                let manifest_path = dir.join("com.downloadcepat.nativehost.json");
+                if std::fs::write(&manifest_path, &firefox_manifest).is_ok() {
+                    installed_count += 1;
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var_os("LOCALAPPDATA")
+            .filter(|s| !s.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Local"));
-        let manifest_dir = appdata.join("Download Cepat/NativeMessagingHosts");
+            .unwrap_or_else(|| home.join("AppData").join("Local"));
+        let manifest_dir = appdata.join("Download Cepat").join("NativeMessagingHosts");
         if std::fs::create_dir_all(&manifest_dir).is_ok() {
             let chrome_manifest_file = manifest_dir.join("com.downloadcepat.nativehost.json");
             if std::fs::write(&chrome_manifest_file, &chromium_manifest).is_ok() {
+                let chrome_manifest_str = normalize_platform_path(chrome_manifest_file).to_string_lossy().into_owned();
                 let reg_keys = [
                     r#"HKCU\Software\Google\Chrome\NativeMessagingHosts\com.downloadcepat.nativehost"#,
                     r#"HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.downloadcepat.nativehost"#,
                     r#"HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                    r#"HKCU\Software\Chromium\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                    r#"HKCU\Software\Vivaldi\NativeMessagingHosts\com.downloadcepat.nativehost"#,
                 ];
                 for k in &reg_keys {
-                    let status = std::process::Command::new("reg")
-                        .args(["add", k, "/ve", "/t", "REG_SZ", "/d", &chrome_manifest_file.to_string_lossy(), "/f"])
+                    let mut cmd = std::process::Command::new("reg");
+                    hide_window_std(&mut cmd);
+                    let status = cmd
+                        .args(["add", k, "/ve", "/t", "REG_SZ", "/d", &chrome_manifest_str, "/f"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
                         .status();
                     if status.map_or(false, |s| s.success()) {
                         installed_count += 1;
                     }
+                }
+            }
+
+            let firefox_manifest_file = manifest_dir.join("firefox.downloadcepat.nativehost.json");
+            if std::fs::write(&firefox_manifest_file, &firefox_manifest).is_ok() {
+                let firefox_manifest_str = normalize_platform_path(firefox_manifest_file).to_string_lossy().into_owned();
+                let mut cmd = std::process::Command::new("reg");
+                hide_window_std(&mut cmd);
+                let status = cmd
+                    .args([
+                        "add",
+                        r#"HKCU\Software\Mozilla\NativeMessagingHosts\com.downloadcepat.nativehost"#,
+                        "/ve",
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        &firefox_manifest_str,
+                        "/f",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                if status.map_or(false, |s| s.success()) {
+                    installed_count += 1;
                 }
             }
         }
@@ -2399,6 +3328,32 @@ fn ensure_bridge_running() {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(exe) = resolve_app_executable_path() {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            let _ = std::process::Command::new(exe)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+                .spawn();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(exe) = resolve_app_executable_path() {
+            let _ = std::process::Command::new(exe)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+
     for _ in 0..40 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)).is_ok() {
@@ -2411,7 +3366,7 @@ fn forward_http_bridge(method: &str, path: &str, body: Option<&str>) -> std::io:
     use std::io::{Read, Write};
     let addr: std::net::SocketAddr = "127.0.0.1:18291".parse().unwrap();
     let mut stream = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3))?;
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(25)));
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(60)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
 
     let body_bytes = body.unwrap_or("").as_bytes();
@@ -2513,21 +3468,661 @@ fn open_external_url(url: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
-fn open_extension_folder() -> Result<String, String> {
-    let candidates = [
-        PathBuf::from("/Users/mustamar/Documents/APLIKASI/Download Cepat/extension"),
-        resolve_path("~/Documents/APLIKASI/Download Cepat/extension"),
-    ];
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallResult {
+    pub started_in_place: bool,
+    pub message: String,
+    pub asset_path: Option<String>,
+}
 
-    for path in &candidates {
-        if path.exists() {
-            let _ = open::that(path);
-            return Ok(format!("Folder ekstensi dibuka di Finder: {}", path.display()));
+fn macos_app_bundle_for_exe(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    let app_dir = contents_dir.parent()?;
+    if macos_dir.file_name().and_then(|s| s.to_str()) == Some("MacOS")
+        && contents_dir.file_name().and_then(|s| s.to_str()) == Some("Contents")
+        && app_dir.extension().and_then(|s| s.to_str()) == Some("app")
+    {
+        Some(app_dir.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn current_platform_env() -> core_engine::PlatformEnvironment {
+    let inside_macos = std::env::current_exe()
+        .ok()
+        .and_then(|p| macos_app_bundle_for_exe(&p))
+        .is_some();
+    core_engine::PlatformEnvironment::detect_current(inside_macos)
+}
+
+fn emit_update_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    progress_percent: f64,
+    message: &str,
+) {
+    let _ = app.emit(
+        "app-update-progress",
+        serde_json::json!({
+            "stage": stage,
+            "downloadedBytes": downloaded_bytes,
+            "totalBytes": total_bytes,
+            "progressPercent": progress_percent,
+            "message": message,
+        }),
+    );
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_cmd_path(path: &Path) -> Result<String, String> {
+    let raw = path.to_string_lossy().replace('/', "\\");
+    if raw.is_empty()
+        || raw.contains('"')
+        || raw.contains('%')
+        || raw.contains('\r')
+        || raw.contains('\n')
+        || raw.contains('&')
+        || raw.contains('|')
+        || raw.contains('<')
+        || raw.contains('>')
+        || raw.contains('^')
+    {
+        return Err(format!(
+            "Jalur instalasi mengandung karakter tidak aman untuk skrip pembaruan: {}",
+            raw
+        ));
+    }
+    Ok(raw)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_update_cmd(
+    installer_path: &Path,
+    exe_path: &Path,
+    is_msi: bool,
+) -> Result<String, String> {
+    let installer = validate_windows_cmd_path(installer_path)?;
+    let exe = validate_windows_cmd_path(exe_path)?;
+    let install_line = if is_msi {
+        format!("start /wait \"\" msiexec /i \"{}\" /passive /norestart", installer)
+    } else {
+        format!("start /wait \"\" \"{}\" /S", installer)
+    };
+    Ok(format!(
+        "@echo off\r\nsetlocal\r\nping -n 4 127.0.0.1 > nul\r\n{}\r\nif exist \"{}\" (\r\n  start \"\" \"{}\"\r\n) else if exist \"%LOCALAPPDATA%\\Download Cepat\\Download Cepat.exe\" (\r\n  start \"\" \"%LOCALAPPDATA%\\Download Cepat\\Download Cepat.exe\"\r\n) else if exist \"%LOCALAPPDATA%\\Download Cepat\\download-cepat-app.exe\" (\r\n  start \"\" \"%LOCALAPPDATA%\\Download Cepat\\download-cepat-app.exe\"\r\n)\r\ndel /f /q \"{}\" > nul 2>&1\r\ndel /f /q \"%~f0\" > nul 2>&1\r\n",
+        install_line, exe, exe, installer
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn directory_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".dc_write_probe_{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(f) => {
+            drop(f);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_extracted_app_bundle(root: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut subdirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.extension().and_then(|e| e.to_str()) == Some("app")
+                && path.join("Contents").join("MacOS").is_dir()
+            {
+                return Some(path);
+            }
+            subdirs.push(path);
+        }
+    }
+    for sub in subdirs {
+        if let Ok(nested) = std::fs::read_dir(sub) {
+            for entry in nested.flatten() {
+                let path = entry.path();
+                if path.is_dir()
+                    && path.extension().and_then(|e| e.to_str()) == Some("app")
+                    && path.join("Contents").join("MacOS").is_dir()
+                {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn check_for_app_update() -> Result<core_engine::AppUpdateInfo, String> {
+    let env = current_platform_env();
+    core_engine::updater::check_github_release(env!("CARGO_PKG_VERSION"), &env).await
+}
+
+fn schedule_app_exit_for_update(app: &tauri::AppHandle) {
+    let exit_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let count = stop_all_real_downloads();
+        if count > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        }
+        exit_handle.exit(0);
+    });
+}
+
+#[tauri::command]
+async fn download_and_install_app_update(app: tauri::AppHandle) -> Result<UpdateInstallResult, String> {
+    emit_update_progress(
+        &app,
+        "checking",
+        0,
+        None,
+        0.0,
+        "Memverifikasi rilis terbaru dari GitHub...",
+    );
+
+    let env = current_platform_env();
+    let info = core_engine::updater::check_github_release(env!("CARGO_PKG_VERSION"), &env).await?;
+    if !info.update_available {
+        return Err(format!(
+            "Download Cepat v{} sudah merupakan versi terbaru.",
+            info.current_version
+        ));
+    }
+
+    let asset_name = info
+        .asset_name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            "Paket pembaruan otomatis untuk platform Anda belum tersedia pada rilis ini. Silakan unduh langsung dari halaman rilis GitHub."
+                .to_string()
+        })?;
+    let asset_url = info
+        .asset_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "URL paket pembaruan tidak tersedia.".to_string())?;
+    let expected_sha = info
+        .asset_sha256
+        .clone()
+        .ok_or_else(|| {
+            "Digest SHA-256 tidak tersedia pada aset rilis GitHub sehingga pemasangan otomatis dibatalkan demi keamanan."
+                .to_string()
+        })?;
+
+    let safe_name = Path::new(&asset_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download-cepat-update.bin".to_string());
+
+    let update_dir = std::env::temp_dir().join("download-cepat-updates");
+    let dest_path = normalize_platform_path(update_dir.join(&safe_name));
+    let known_total = info.asset_size;
+
+    let app_for_progress = app.clone();
+    let mut last_emit = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut last_pct = -1.0f64;
+
+    core_engine::updater::download_verified_asset(
+        &asset_url,
+        &dest_path,
+        &expected_sha,
+        &info.current_version,
+        true,
+        |downloaded, resp_total| {
+            let total = resp_total.or(known_total);
+            let pct = match total {
+                Some(t) if t > 0 => ((downloaded as f64 / t as f64) * 100.0).min(100.0),
+                _ => 0.0,
+            };
+            let now = std::time::Instant::now();
+            let done = total.map_or(false, |t| downloaded >= t);
+            if done || now.duration_since(last_emit) >= std::time::Duration::from_millis(120) || (pct - last_pct).abs() >= 1.0 {
+                last_emit = now;
+                last_pct = pct;
+                emit_update_progress(
+                    &app_for_progress,
+                    "downloading",
+                    downloaded,
+                    total,
+                    pct,
+                    "Mengunduh paket pembaruan resmi...",
+                );
+            }
+        },
+    )
+    .await?;
+
+    emit_update_progress(
+        &app,
+        "installing",
+        dest_path.metadata().map(|m| m.len()).unwrap_or(0),
+        known_total,
+        100.0,
+        "Checksum SHA-256 terverifikasi. Memasang pembaruan...",
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("Gagal mendeteksi executable Download Cepat: {}", e))?;
+        let is_msi = info.install_kind == "windows_msi";
+        let script_content = build_windows_update_cmd(&dest_path, &exe_path, is_msi)?;
+        let script_path = update_dir.join("dc_apply_update.cmd");
+        std::fs::write(&script_path, script_content)
+            .map_err(|e| format!("Gagal membuat skrip pembaruan Windows: {}", e))?;
+
+        std::process::Command::new("cmd")
+            .args(["/C", &script_path.to_string_lossy().into_owned()])
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Gagal menjalankan installer pembaruan: {}", e))?;
+
+        schedule_app_exit_for_update(&app);
+        return Ok(UpdateInstallResult {
+            started_in_place: true,
+            message: format!(
+                "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. Aplikasi akan menutup sebentar untuk memasang pembaruan dan dibuka kembali otomatis.",
+                info.latest_version
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if info.install_kind == "macos_app_tarball" {
+            if let Some(target_app) = std::env::current_exe()
+                .ok()
+                .and_then(|p| macos_app_bundle_for_exe(&p))
+            {
+                let extract_dir = update_dir.join("extracted");
+                let _ = std::fs::remove_dir_all(&extract_dir);
+                std::fs::create_dir_all(&extract_dir)
+                    .map_err(|e| format!("Gagal membuat folder ekstraksi pembaruan: {}", e))?;
+
+                let tar_status = tokio::process::Command::new("/usr/bin/tar")
+                    .arg("-xzf")
+                    .arg(&dest_path)
+                    .arg("-C")
+                    .arg(&extract_dir)
+                    .status()
+                    .await
+                    .map_err(|e| format!("Gagal mengekstrak arsip pembaruan macOS: {}", e))?;
+                if !tar_status.success() {
+                    return Err("Ekstraksi paket pembaruan macOS gagal.".to_string());
+                }
+
+                let new_app = find_extracted_app_bundle(&extract_dir).ok_or_else(|| {
+                    "Berkas .app baru tidak ditemukan di dalam arsip pembaruan.".to_string()
+                })?;
+
+                let _ = std::process::Command::new("/usr/bin/xattr")
+                    .args(["-dr", "com.apple.quarantine"])
+                    .arg(&new_app)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+
+                let writable = target_app
+                    .parent()
+                    .map(directory_is_writable)
+                    .unwrap_or(false);
+                if writable {
+                    let pid_str = std::process::id().to_string();
+                    let script = r#"
+OLD_PID="$1"
+NEW_APP="$2"
+TARGET_APP="$3"
+TAR_FILE="$4"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+rm -rf "${TARGET_APP}.backup"
+if [ -e "$TARGET_APP" ]; then
+  mv "$TARGET_APP" "${TARGET_APP}.backup" || exit 1
+fi
+if mv "$NEW_APP" "$TARGET_APP"; then
+  rm -rf "${TARGET_APP}.backup"
+else
+  mv "${TARGET_APP}.backup" "$TARGET_APP" 2>/dev/null
+  exit 1
+fi
+rm -f "$TAR_FILE"
+/usr/bin/xattr -dr com.apple.quarantine "$TARGET_APP" 2>/dev/null || true
+/usr/bin/open -n "$TARGET_APP"
+"#;
+                    std::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(script)
+                        .arg("dc-macos-updater")
+                        .arg(&pid_str)
+                        .arg(&new_app)
+                        .arg(&target_app)
+                        .arg(&dest_path)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map_err(|e| format!("Gagal meluncurkan skrip pembaruan macOS: {}", e))?;
+
+                    schedule_app_exit_for_update(&app);
+                    return Ok(UpdateInstallResult {
+                        started_in_place: true,
+                        message: format!(
+                            "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. Download Cepat akan memuat ulang otomatis.",
+                            info.latest_version
+                        ),
+                        asset_path: Some(dest_path.display().to_string()),
+                    });
+                }
+            }
+        }
+
+        let _ = open::that(&dest_path);
+        return Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Installer v{} ({}) telah diverifikasi SHA-256 dan dibuka. Seret aplikasi ke folder Applications untuk menyelesaikan pembaruan.",
+                info.latest_version, safe_name
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if info.install_kind == "linux_appimage" {
+            let _ = std::fs::set_permissions(&dest_path, std::fs::Permissions::from_mode(0o755));
+            if let Some(current_appimage) = std::env::var_os("APPIMAGE")
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+            {
+                if let Some(app_dir) = current_appimage.parent() {
+                    if directory_is_writable(app_dir) {
+                        let staged_path = app_dir.join(format!(
+                            ".{}.update.tmp",
+                            current_appimage
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Download-Cepat.AppImage")
+                        ));
+                        let _ = std::fs::remove_file(&staged_path);
+                        let moved_staged = if std::fs::rename(&dest_path, &staged_path).is_ok() {
+                            true
+                        } else if std::fs::copy(&dest_path, &staged_path).is_ok() {
+                            let _ = std::fs::remove_file(&dest_path);
+                            true
+                        } else {
+                            false
+                        };
+                        if moved_staged {
+                            let _ = std::fs::set_permissions(
+                                &staged_path,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
+                            let pid_str = std::process::id().to_string();
+                            let script = r#"
+OLD_PID="$1"
+STAGED="$2"
+TARGET="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+mv -f "$STAGED" "$TARGET" || exit 1
+chmod +x "$TARGET"
+unset APPIMAGE APPDIR ARGV0 OWD LD_LIBRARY_PATH GDK_PIXBUF_MODULE_FILE GST_PLUGIN_SYSTEM_PATH
+nohup "$TARGET" >/dev/null 2>&1 &
+"#;
+                            std::process::Command::new("/bin/sh")
+                                .arg("-c")
+                                .arg(script)
+                                .arg("dc-appimage-updater")
+                                .arg(&pid_str)
+                                .arg(&staged_path)
+                                .arg(&current_appimage)
+                                .env_remove("APPIMAGE")
+                                .env_remove("APPDIR")
+                                .env_remove("ARGV0")
+                                .env_remove("OWD")
+                                .env_remove("LD_LIBRARY_PATH")
+                                .stdin(std::process::Stdio::null())
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                                .map_err(|e| format!("Gagal menjalankan pembaruan AppImage: {}", e))?;
+
+                            schedule_app_exit_for_update(&app);
+                            return Ok(UpdateInstallResult {
+                                started_in_place: true,
+                                message: format!(
+                                    "Pembaruan v{} berhasil diunduh & diverifikasi SHA-256. AppImage akan diperbarui dan dijalankan ulang otomatis.",
+                                    info.latest_version
+                                ),
+                                asset_path: Some(current_appimage.display().to_string()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let downloads_dest = resolve_path("~/Downloads").join(&safe_name);
+            let final_path = if std::fs::copy(&dest_path, &downloads_dest).is_ok() {
+                let _ = std::fs::remove_file(&dest_path);
+                let _ = std::fs::set_permissions(&downloads_dest, std::fs::Permissions::from_mode(0o755));
+                downloads_dest
+            } else {
+                dest_path
+            };
+            if let Some(parent) = final_path.parent() {
+                let _ = open::that(parent);
+            }
+            return Ok(UpdateInstallResult {
+                started_in_place: false,
+                message: format!(
+                    "AppImage v{} terverifikasi SHA-256 dan disimpan ke {} (siap dijalankan langsung).",
+                    info.latest_version,
+                    final_path.display()
+                ),
+                asset_path: Some(final_path.display().to_string()),
+            });
+        }
+
+        if info.install_kind == "linux_deb" || info.install_kind == "linux_rpm" {
+            let pkexec_available = find_executable_in_dirs(&["pkexec"], &[PathBuf::from("/usr/bin")]).is_some();
+            if pkexec_available {
+                let exe_path = std::env::current_exe()
+                    .map_err(|e| format!("Gagal mendeteksi executable Download Cepat: {}", e))?;
+                let pid_str = std::process::id().to_string();
+                let script = if info.install_kind == "linux_deb" {
+                    r#"
+OLD_PID="$1"
+PKG="$2"
+EXE="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+pkexec /bin/sh -c 'dpkg -i "$1" || apt-get install -f -y' _ "$PKG"
+STATUS=$?
+rm -f "$PKG"
+if [ $STATUS -eq 0 ] && [ -x "$EXE" ]; then
+  nohup "$EXE" >/dev/null 2>&1 &
+fi
+"#
+                } else {
+                    r#"
+OLD_PID="$1"
+PKG="$2"
+EXE="$3"
+while kill -0 "$OLD_PID" 2>/dev/null; do sleep 0.2; done
+sleep 0.3
+pkexec /bin/sh -c 'if command -v dnf >/dev/null 2>&1; then dnf install -y "$1"; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install -y "$1"; else rpm -Uvh "$1"; fi' _ "$PKG"
+STATUS=$?
+rm -f "$PKG"
+if [ $STATUS -eq 0 ] && [ -x "$EXE" ]; then
+  nohup "$EXE" >/dev/null 2>&1 &
+fi
+"#
+                };
+                std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(script)
+                    .arg("dc-linux-pkg-updater")
+                    .arg(&pid_str)
+                    .arg(&dest_path)
+                    .arg(&exe_path)
+                    .env_remove("APPIMAGE")
+                    .env_remove("APPDIR")
+                    .env_remove("ARGV0")
+                    .env_remove("OWD")
+                    .env_remove("LD_LIBRARY_PATH")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| format!("Gagal menjalankan pemasang paket Linux: {}", e))?;
+
+                schedule_app_exit_for_update(&app);
+                return Ok(UpdateInstallResult {
+                    started_in_place: true,
+                    message: format!(
+                        "Paket v{} terverifikasi SHA-256. Konfirmasi kata sandi sistem bila diminta untuk memasang pembaruan otomatis.",
+                        info.latest_version
+                    ),
+                    asset_path: Some(dest_path.display().to_string()),
+                });
+            }
+        }
+
+        let _ = open::that(&dest_path);
+        return Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Paket pembaruan v{} telah diunduh dan diverifikasi SHA-256 di {}.",
+                info.latest_version,
+                dest_path.display()
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = open::that(&dest_path);
+        Ok(UpdateInstallResult {
+            started_in_place: false,
+            message: format!(
+                "Paket pembaruan v{} diunduh & diverifikasi SHA-256 di {}.",
+                info.latest_version,
+                dest_path.display()
+            ),
+            asset_path: Some(dest_path.display().to_string()),
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_extension_folder(app: tauri::AppHandle) -> Result<String, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(res_dir) = app.path().resource_dir() {
+        candidates.push(res_dir.join("extension"));
+        candidates.push(res_dir.join("_up_").join("extension"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("extension"));
+            candidates.push(exe_dir.join("resources").join("extension"));
+            for ancestor in exe_dir.ancestors().take(4) {
+                candidates.push(ancestor.join("extension"));
+            }
+        }
+    }
+    if let Some(manifest_ext) = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|p| p.join("extension"))
+    {
+        candidates.push(manifest_ext);
+    }
+    candidates.push(resolve_path("~/.download-cepat/extension"));
+
+    let mut found = candidates
+        .into_iter()
+        .find(|p| p.is_dir() && p.join("manifest.json").is_file())
+        .ok_or_else(|| {
+            "Folder ekstensi tidak ditemukan di paket aplikasi. Anda juga dapat memasang langsung dari Chrome Web Store."
+                .to_string()
+        })?;
+
+    #[cfg(target_os = "linux")]
+    {
+        let found_str = found.to_string_lossy();
+        if found_str.starts_with("/tmp/.mount_") || found_str.starts_with("/usr/") {
+            let persistent = resolve_path("~/.download-cepat/extension");
+            if copy_dir_recursive(&found, &persistent).is_ok()
+                && persistent.join("manifest.json").is_file()
+            {
+                found = persistent;
+            }
         }
     }
 
-    Err("Folder ekstensi tidak ditemukan.".to_string())
+    found = normalize_platform_path(found);
+    open::that(&found)
+        .map_err(|e| format!("Gagal membuka folder ekstensi ({}): {}", found.display(), e))?;
+
+    #[cfg(target_os = "macos")]
+    return Ok(format!("Folder ekstensi dibuka di Finder: {}", found.display()));
+    #[cfg(target_os = "windows")]
+    return Ok(format!(
+        "Folder ekstensi dibuka di File Explorer: {}",
+        found.display()
+    ));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return Ok(format!(
+        "Folder ekstensi dibuka di File Manager: {}",
+        found.display()
+    ));
 }
 
 fn url_decode(s: &str) -> String {
@@ -2753,48 +4348,56 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                             }
                         }
 
+                        let mut inspect_err_msg = "Stream video tidak dapat dianalisis.".to_string();
                         if !target_url.is_empty() {
-                            if let Some(res) = inspect_video_url_with_headers(
+                            match inspect_video_url_with_headers(
                                 &target_url,
                                 inspect_cookie.as_deref(),
                                 inspect_referer.as_deref(),
                                 inspect_ua.as_deref(),
-                            ).await {
-                                let formats_json: Vec<serde_json::Value> = res.media_info.as_ref().map_or(vec![], |m| {
-                                    m.formats.iter().map(|f| {
-                                        serde_json::json!({
-                                            "formatId": f.format_id,
-                                            "resolution": f.resolution,
-                                            "extension": f.extension,
-                                            "fileSizeApprox": f.file_size_approx,
-                                            "sizeLabel": f.file_size_approx.map(format_bytes_label).unwrap_or_else(|| "Ukuran dinamis".to_string()),
-                                            "isAudioOnly": f.is_audio_only
-                                        })
-                                    }).collect()
-                                });
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    let formats_json: Vec<serde_json::Value> = res.media_info.as_ref().map_or(vec![], |m| {
+                                        m.formats.iter().map(|f| {
+                                            serde_json::json!({
+                                                "formatId": f.format_id,
+                                                "resolution": f.resolution,
+                                                "extension": f.extension,
+                                                "fileSizeApprox": f.file_size_approx,
+                                                "sizeLabel": f.file_size_approx.map(format_bytes_label).unwrap_or_else(|| "Ukuran dinamis".to_string()),
+                                                "isAudioOnly": f.is_audio_only
+                                            })
+                                        }).collect()
+                                    });
 
-                                let title = res.file_name.trim_end_matches(".mp4").to_string();
-                                let resp_body = serde_json::json!({
-                                    "status": "ok",
-                                    "title": title,
-                                    "durationSeconds": res.media_info.as_ref().and_then(|m| m.duration_seconds),
-                                    "thumbnailUrl": res.media_info.as_ref().and_then(|m| m.thumbnail_url.clone()),
-                                    "formats": formats_json
-                                }).to_string();
+                                    let title = res.file_name.trim_end_matches(".mp4").to_string();
+                                    let resp_body = serde_json::json!({
+                                        "status": "ok",
+                                        "title": title,
+                                        "durationSeconds": res.media_info.as_ref().and_then(|m| m.duration_seconds),
+                                        "thumbnailUrl": res.media_info.as_ref().and_then(|m| m.thumbnail_url.clone()),
+                                        "formats": formats_json
+                                    }).to_string();
 
-                                let resp = format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                                    resp_body.len(),
-                                    resp_body
-                                );
-                                let _ = stream.write_all(resp.as_bytes()).await;
-                                return;
+                                    let resp = format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                                        resp_body.len(),
+                                        resp_body
+                                    );
+                                    let _ = stream.write_all(resp.as_bytes()).await;
+                                    return;
+                                }
+                                Err(e) => {
+                                    inspect_err_msg = e;
+                                }
                             }
                         }
 
                         let resp_body = serde_json::json!({
                             "status": "error",
-                            "message": "Stream video tidak dapat dianalisis."
+                            "message": inspect_err_msg
                         }).to_string();
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
@@ -2815,21 +4418,29 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                 let format_id = v["formatId"].as_str().unwrap_or("1080p_mp4").to_string();
                                 let resolution = v["resolution"].as_str().unwrap_or("1080p (Full HD)").to_string();
                                 let ext = v["extension"].as_str().unwrap_or("mp4").to_string();
-                                let is_audio = v["isAudioOnly"].as_bool().unwrap_or(false) || ext == "mp3" || ext == "m4a";
+                                let clean_ext: String = ext
+                                    .chars()
+                                    .filter(|c| c.is_ascii_alphanumeric())
+                                    .collect::<String>()
+                                    .to_ascii_lowercase();
+                                let clean_ext = if clean_ext.is_empty() {
+                                    "mp4".to_string()
+                                } else {
+                                    clean_ext
+                                };
+                                let is_audio = v["isAudioOnly"].as_bool().unwrap_or(false)
+                                    || clean_ext == "mp3"
+                                    || clean_ext == "m4a";
                                 let conn_count = v["connections"].as_u64().or_else(|| v["numConnections"].as_u64()).unwrap_or(8) as usize;
                                 let cookie_opt = v["cookie"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
                                 let referer_opt = v["referer"].as_str().or_else(|| v["referrer"].as_str()).filter(|s| !s.trim().is_empty()).map(String::from);
                                 let ua_opt = v["userAgent"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
 
-                                let clean_title: String = raw_title.chars().map(|c| match c {
-                                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-                                    other => other,
-                                }).collect();
-                                let clean_title = if clean_title.trim().is_empty() { "Video".to_string() } else { clean_title.trim().to_string() };
+                                let clean_title = sanitize_media_title(&raw_title, "Video");
 
                                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
                                 let task_id = format!("task-{}", now_ms);
-                                let file_name = format!("{}.{}", clean_title, ext);
+                                let file_name = format!("{}.{}", clean_title, clean_ext);
                                 let cat_id = if is_audio { "music" } else { "video" };
                                 let dest_path = if is_audio {
                                     format!("~/Downloads/Music/{}", file_name)
@@ -3029,7 +4640,9 @@ pub fn run() {
             open_extension_folder,
             open_external_url,
             get_build_info,
-            set_tray_language
+            set_tray_language,
+            check_for_app_update,
+            download_and_install_app_update
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -3118,6 +4731,13 @@ pub fn run() {
             std::thread::spawn(|| {
                 let _ = sync_native_messaging_hosts();
             });
+            if get_ytdlp_bin().is_none() {
+                tauri::async_runtime::spawn(async {
+                    if let Err(e) = ensure_ytdlp_bin().await {
+                        log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e);
+                    }
+                });
+            }
             tauri::async_runtime::spawn(async move {
                 start_browser_bridge_server(handle).await;
             });
@@ -3141,14 +4761,13 @@ pub fn run() {
                     show_main_window(app_handle);
                 }
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(not(target_os = "macos"))]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if code.is_none() {
                     api.prevent_exit();
                 }
             }
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let _ = (app_handle, event);
+            let _ = &app_handle;
         });
 }
 
@@ -3160,7 +4779,7 @@ mod tests {
     async fn test_inspect_video_url_live() {
         let url = "https://www.youtube.com/watch?v=Jdj13fGMmmA";
         let res = inspect_video_url(url).await;
-        assert!(res.is_some(), "inspect_video_url should return a result for YouTube video");
+        assert!(res.is_ok(), "inspect_video_url should succeed for YouTube video: {:?}", res.err());
         let info = res.unwrap();
         assert!(!info.file_name.is_empty());
         assert!(info.media_info.is_some());
@@ -3186,7 +4805,7 @@ mod tests {
             Some("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
         )
         .await;
-        assert!(res_hdr.is_some(), "YouTube inspect with Chrome headers should succeed");
+        assert!(res_hdr.is_ok(), "YouTube inspect with Chrome headers should succeed: {:?}", res_hdr.err());
         let formats_hdr = res_hdr.unwrap().media_info.unwrap().formats;
         assert!(
             formats_hdr.iter().any(|f| !f.is_audio_only),
@@ -3236,6 +4855,8 @@ mod tests {
             "Song.temp_stream.mp4",
             "Song.temp_stream.mp4.part",
             "Song.temp_stream.mp4.ytdl",
+            "Song.temp_stream.m4a",
+            "Song.temp_stream.m4a.part",
             "Song.f140.m4a",
             "Song.f251.webm.part",
         ];
@@ -3375,11 +4996,61 @@ mod tests {
 
         let firefox_json = build_firefox_manifest_json("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app");
         assert!(firefox_json.contains("allowed_extensions"));
+        assert!(!firefox_json.contains("allowed_origins"));
 
         let ext_sync_count = sync_external_extensions();
         assert!(ext_sync_count >= 1, "Should configure at least 1 browser external extension path");
 
         let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_cross_platform_helpers() {
+        let home = user_home_dir().expect("home directory should resolve");
+        assert_eq!(resolve_path("~"), home);
+        assert_eq!(
+            resolve_path("~/Downloads/Video/clip.mp4"),
+            home.join("Downloads").join("Video").join("clip.mp4")
+        );
+        assert_eq!(
+            resolve_path(r"~\Downloads\Video\clip.mp4"),
+            home.join("Downloads").join("Video").join("clip.mp4")
+        );
+
+        assert_eq!(sanitize_media_title("CON", "Video"), "_CON");
+        assert_eq!(sanitize_media_title("Video: Test? <1>...", "Video"), "Video_ Test_ _1_");
+        assert_eq!(sanitize_media_title("   ", "Video"), "Video");
+        assert!(sanitize_media_title(&"a".repeat(220), "Video").chars().count() <= 160);
+
+        assert_eq!(
+            path_to_file_uri(Path::new("/tmp/My Downloads/file 100%.zip")),
+            "file:///tmp/My%20Downloads/file%20100%25.zip"
+        );
+
+        assert!(ytdlp_download_url_for("windows", "x86_64").ends_with("/yt-dlp.exe"));
+        assert!(ytdlp_download_url_for("linux", "x86_64").ends_with("/yt-dlp_linux"));
+        assert!(ytdlp_download_url_for("linux", "aarch64").ends_with("/yt-dlp_linux_aarch64"));
+        assert!(ytdlp_download_url_for("macos", "aarch64").ends_with("/yt-dlp_macos"));
+
+        let desktop = build_linux_autostart_desktop_entry("/opt/Download Cepat/App 100%$x.AppImage");
+        assert!(desktop.contains("[Desktop Entry]"));
+        assert!(desktop.contains("Exec=\"/opt/Download Cepat/App 100%%\\$x.AppImage\""));
+        assert!(desktop.contains("X-GNOME-Autostart-enabled=true"));
+
+        let base_dir = std::env::temp_dir().join(format!("dc_copy_ext_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let src_dir = base_dir.join("src");
+        let dst_dir = base_dir.join("dst");
+        std::fs::create_dir_all(src_dir.join("icons")).expect("create icons dir");
+        std::fs::write(src_dir.join("manifest.json"), b"{}").expect("write manifest");
+        std::fs::write(src_dir.join("icons").join("icon-16.png"), b"png").expect("write icon");
+        copy_dir_recursive(&src_dir, &dst_dir).expect("copy_dir_recursive should succeed");
+        assert!(dst_dir.join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read(dst_dir.join("icons").join("icon-16.png")).unwrap(),
+            b"png"
+        );
+        let _ = std::fs::remove_dir_all(&base_dir);
     }
 
     #[test]
@@ -3412,7 +5083,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.version, "1.0.1");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
@@ -3426,5 +5097,41 @@ mod tests {
 
         let id = tray_labels_for_lang("id");
         assert_eq!(id.quit, "Keluar");
+    }
+
+    #[test]
+    fn test_auto_updater_platform_and_script_helpers() {
+        assert_eq!(
+            macos_app_bundle_for_exe(Path::new("/Applications/Download Cepat.app/Contents/MacOS/download-cepat-app")),
+            Some(PathBuf::from("/Applications/Download Cepat.app"))
+        );
+        assert_eq!(
+            macos_app_bundle_for_exe(Path::new("/usr/local/bin/download-cepat-app")),
+            None
+        );
+
+        let nsis_cmd = build_windows_update_cmd(
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64-setup.exe"),
+            Path::new(r"C:\Users\Alice\AppData\Local\Download Cepat\Download Cepat.exe"),
+            false,
+        )
+        .expect("valid NSIS script");
+        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64-setup.exe\" /S"));
+        assert!(nsis_cmd.contains("start \"\" \"C:\\Users\\Alice\\AppData\\Local\\Download Cepat\\Download Cepat.exe\""));
+
+        let msi_cmd = build_windows_update_cmd(
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64.msi"),
+            Path::new(r"C:\Program Files\Download Cepat\Download Cepat.exe"),
+            true,
+        )
+        .expect("valid MSI script");
+        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64.msi\" /passive /norestart"));
+
+        // Injection / unsafe batch chars must be rejected
+        assert!(build_windows_update_cmd(
+            Path::new(r"C:\Temp\evil&calc.exe"),
+            Path::new(r"C:\App\dc.exe"),
+            false
+        ).is_err());
     }
 }

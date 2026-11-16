@@ -4,7 +4,8 @@ use std::path::Path;
 use url::Url;
 
 use crate::inspector::{
-    build_http_clients, categorize_filename, send_with_redirects, DEFAULT_USER_AGENT,
+    build_http_clients, categorize_filename, sanitize_filename, send_with_redirects,
+    DEFAULT_USER_AGENT,
 };
 use crate::model::GrabbedAsset;
 
@@ -76,12 +77,12 @@ pub fn extract_raw_urls_from_html(html: &str) -> Vec<String> {
 
 fn classify_asset(resolved_url: &Url) -> (String, String, String, String) {
     let path = resolved_url.path();
-    let file_name = Path::new(path)
+    let raw_name = Path::new(path)
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
-        .unwrap_or("index.html")
-        .to_string();
+        .unwrap_or("index.html");
+    let file_name = sanitize_filename(raw_name);
 
     let ext = Path::new(&file_name)
         .extension()
