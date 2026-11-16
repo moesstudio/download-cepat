@@ -1,7 +1,7 @@
 {
   "name": "download-cepat",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Download Cepat — Multi-connection high-speed desktop download manager",
   "author": "Ujang Mustamar",
   "license": "MIT",

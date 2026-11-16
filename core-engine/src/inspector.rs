@@ -306,11 +306,15 @@ impl UrlInspector {
         )
         .await;
 
+        let mut head_ok_without_range_hdr: Option<reqwest::Response> = None;
         let need_get_probe = match &head_res {
             Ok(res) if res.status().is_success() => {
                 let f_url = res.url().as_str();
+                let missing_range_signal = res.headers().get(ACCEPT_RANGES).is_none()
+                    && res.headers().get("content-range").is_none();
                 is_unexpected_html_response(raw_url, f_url, res.headers(), None)
                     || res.headers().get(CONTENT_LENGTH).is_none()
+                    || missing_range_signal
             }
             _ => true,
         };
@@ -318,6 +322,15 @@ impl UrlInspector {
         let response = if !need_get_probe {
             head_res.unwrap()
         } else {
+            if let Ok(res) = head_res {
+                let f_url = res.url().as_str().to_string();
+                if res.status().is_success()
+                    && !is_unexpected_html_response(raw_url, &f_url, res.headers(), None)
+                    && res.headers().get(CONTENT_LENGTH).is_some()
+                {
+                    head_ok_without_range_hdr = Some(res);
+                }
+            }
             let get_res = send_with_redirects(
                 active_client,
                 reqwest::Method::GET,
@@ -333,12 +346,20 @@ impl UrlInspector {
             .await;
 
             match get_res {
-                Ok(res) if res.status().is_success() => res,
+                Ok(res)
+                    if res.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                        || (res.status().is_success()
+                            && (res.headers().contains_key(CONTENT_LENGTH)
+                                || res.headers().contains_key("content-range")
+                                || head_ok_without_range_hdr.is_none())) =>
+                {
+                    res
+                }
                 Ok(res) if !has_browser_identity
                     && (res.status() == reqwest::StatusCode::FORBIDDEN
                         || res.status() == reqwest::StatusCode::UNAUTHORIZED) =>
                 {
-                    send_with_redirects(
+                    let retry_res = send_with_redirects(
                         active_fallback,
                         reqwest::Method::GET,
                         raw_url,
@@ -350,13 +371,33 @@ impl UrlInspector {
                         auth_u,
                         auth_p,
                     )
-                    .await
-                    .context("Gagal menghubungi server untuk inspeksi URL")?
+                    .await;
+                    match retry_res {
+                        Ok(r)
+                            if r.status() == reqwest::StatusCode::PARTIAL_CONTENT
+                                || (r.status().is_success()
+                                    && (r.headers().contains_key(CONTENT_LENGTH)
+                                        || r.headers().contains_key("content-range")
+                                        || head_ok_without_range_hdr.is_none())) =>
+                        {
+                            r
+                        }
+                        _ if head_ok_without_range_hdr.is_some() => {
+                            head_ok_without_range_hdr.take().unwrap()
+                        }
+                        other => other.context("Gagal menghubungi server untuk inspeksi URL")?,
+                    }
                 }
-                Ok(res) => res,
+                Ok(res) => {
+                    if let Some(head_ok) = head_ok_without_range_hdr.take() {
+                        head_ok
+                    } else {
+                        res
+                    }
+                }
                 Err(e) => {
                     if !has_browser_identity {
-                        send_with_redirects(
+                        match send_with_redirects(
                             active_fallback,
                             reqwest::Method::GET,
                             raw_url,
@@ -369,7 +410,22 @@ impl UrlInspector {
                             auth_p,
                         )
                         .await
-                        .with_context(|| format!("Gagal menghubungi server untuk inspeksi URL: {}", e))?
+                        {
+                            Ok(r) => r,
+                            Err(e2) => {
+                                if let Some(head_ok) = head_ok_without_range_hdr.take() {
+                                    head_ok
+                                } else {
+                                    return Err(anyhow::anyhow!(
+                                        "Gagal menghubungi server untuk inspeksi URL: {} ({})",
+                                        e,
+                                        e2
+                                    ));
+                                }
+                            }
+                        }
+                    } else if let Some(head_ok) = head_ok_without_range_hdr.take() {
+                        head_ok
                     } else {
                         return Err(anyhow::anyhow!("Gagal menghubungi server untuk inspeksi URL: {}", e));
                     }

@@ -1538,4 +1538,107 @@ async fn test_updater_fetch_and_sha256_verification() {
     srv_handle.abort();
 }
 
+#[test]
+fn test_build_connection_stepdown_plan_supports_32_thread_tier() {
+    use core_engine::downloader::build_connection_stepdown_plan;
 
+    assert_eq!(
+        build_connection_stepdown_plan(32, true),
+        vec![(32, true), (16, true), (4, true), (1, false)]
+    );
+    assert_eq!(
+        build_connection_stepdown_plan(64, true),
+        vec![(32, true), (16, true), (4, true), (1, false)]
+    );
+    assert_eq!(
+        build_connection_stepdown_plan(16, true),
+        vec![(16, true), (4, true), (1, false)]
+    );
+    assert_eq!(
+        build_connection_stepdown_plan(8, true),
+        vec![(8, true), (4, true), (1, false)]
+    );
+    assert_eq!(
+        build_connection_stepdown_plan(4, true),
+        vec![(4, true), (1, false)]
+    );
+    assert_eq!(build_connection_stepdown_plan(32, false), vec![(1, false)]);
+}
+
+#[tokio::test]
+async fn test_inspector_head_without_accept_ranges_probes_get_range_zero() {
+    use core_engine::inspector::UrlInspector;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let payload = vec![0x77u8; 4096];
+    let payload_arc = std::sync::Arc::new(payload);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind inspector mock");
+    let addr = listener.local_addr().unwrap();
+
+    let sp = payload_arc.clone();
+    let server_handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let data = sp.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first_line = req.lines().next().unwrap_or("");
+                let has_range = req.lines().any(|l| l.to_ascii_lowercase().starts_with("range:"));
+
+                if first_line.contains("/cdn-range-hidden.mp4") {
+                    if first_line.starts_with("HEAD ") {
+                        // Google CDN style: 200 OK with Content-Length, intentionally omits Accept-Ranges
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = sock.write_all(hdr.as_bytes()).await;
+                    } else if has_range {
+                        let hdr = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/{}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = sock.write_all(hdr.as_bytes()).await;
+                        let _ = sock.write_all(&data[0..1]).await;
+                    }
+                } else if first_line.contains("/head-only-no-get-range.zip") {
+                    if first_line.starts_with("HEAD ") {
+                        let hdr = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            data.len()
+                        );
+                        let _ = sock.write_all(hdr.as_bytes()).await;
+                    } else {
+                        let resp = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                    }
+                }
+            });
+        }
+    });
+
+    let inspector = UrlInspector::new().expect("inspector init");
+    let res1 = inspector
+        .inspect(&format!("http://{}/cdn-range-hidden.mp4", addr))
+        .await
+        .expect("GET range probe should detect hidden Range support");
+    assert!(res1.supports_range, "Expected supports_range=true via GET Range: bytes=0-0 probe");
+    assert_eq!(res1.file_size, Some(payload_arc.len() as u64));
+
+    let res2 = inspector
+        .inspect(&format!("http://{}/head-only-no-get-range.zip", addr))
+        .await
+        .expect("Must fall back cleanly to valid HEAD response when GET range returns 405");
+    assert!(!res2.supports_range);
+    assert_eq!(res2.file_size, Some(payload_arc.len() as u64));
+
+    server_handle.abort();
+}

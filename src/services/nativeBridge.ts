@@ -420,7 +420,7 @@ export const OFFICIAL_RELEASES_URL = 'https://github.com/moesstudio/download-cep
 
 export const FALLBACK_BUILD_INFO: BuildInfo = {
   appName: 'Download Cepat',
-  version: '1.0.2',
+  version: '1.0.3',
   author: 'Ujang Mustamar',
   publisher: 'Ujang Mustamar',
   copyright: 'Copyright © 2026 Ujang Mustamar',
@@ -431,6 +431,27 @@ export const FALLBACK_BUILD_INFO: BuildInfo = {
   arch: 'universal',
   buildProfile: 'release',
   tauriVersion: '2.12.x',
+};
+
+export interface RuntimeDownloadSettingsPayload {
+  defaultConnections: number;
+  maxTasks: number;
+  speedLimitKbs: number;
+  proxyUrl?: string | null;
+  videoSaveDir: string;
+  musicSaveDir: string;
+}
+
+export const syncRuntimeSettings = async (
+  settings: RuntimeDownloadSettingsPayload
+): Promise<void> => {
+  if (isTauri()) {
+    try {
+      await invoke('sync_runtime_settings', { settings });
+    } catch (err) {
+      console.warn('Failed to sync runtime download settings:', err);
+    }
+  }
 };
 
 export const getBuildInfo = async (): Promise<BuildInfo> => {

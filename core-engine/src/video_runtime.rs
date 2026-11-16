@@ -708,6 +708,422 @@ pub fn extract_zip_archive(zip_path: &Path, dest_dir: &Path) -> Result<usize, St
     Ok(extracted_files)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHttpStream {
+    pub url: String,
+    pub ext: String,
+    pub vcodec: String,
+    pub acodec: String,
+    pub filesize: Option<u64>,
+    pub height: Option<u64>,
+    pub fps: Option<u64>,
+    pub tbr_kbps: u64,
+    pub abr_kbps: u64,
+    pub user_agent: Option<String>,
+    pub referer: Option<String>,
+    pub cookie_header: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoStreamPlan {
+    /// Progressive video+audio stream or single audio stream downloadable directly via HTTP Range.
+    SingleStream(ResolvedHttpStream),
+    /// Separate high-resolution video track and audio track to download at full concurrency and mux.
+    SplitVideoAudio {
+        video: ResolvedHttpStream,
+        audio: ResolvedHttpStream,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompositePhaseProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub progress_percent: f64,
+    pub eta_seconds: Option<u64>,
+}
+
+fn is_manifest_stream_url(raw_url: &str) -> bool {
+    let lower = raw_url.trim().to_ascii_lowercase();
+    let without_scheme = lower
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&lower);
+    let path_only = without_scheme.split(&['?', '#'][..]).next().unwrap_or("");
+    path_only.ends_with(".m3u8")
+        || path_only.ends_with(".mpd")
+        || lower.contains(".m3u8?")
+        || lower.contains(".mpd?")
+}
+
+fn header_lookup_ci(
+    obj: Option<&serde_json::Map<String, serde_json::Value>>,
+    target_key: &str,
+) -> Option<String> {
+    let map = obj?;
+    for (k, v) in map {
+        if k.eq_ignore_ascii_case(target_key) {
+            if let Some(s) = v.as_str() {
+                let clean = s.replace(['\r', '\n', '\0'], " ").trim().to_string();
+                if !clean.is_empty() {
+                    return Some(clean);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_direct_http_stream(
+    entry: &serde_json::Value,
+    fallback_headers: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<ResolvedHttpStream> {
+    let url = entry["url"].as_str()?.trim();
+    let url_lower = url.to_ascii_lowercase();
+    if !(url_lower.starts_with("http://") || url_lower.starts_with("https://")) {
+        return None;
+    }
+    if is_manifest_stream_url(url) {
+        return None;
+    }
+
+    let ext = entry["ext"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+    let note = entry["format_note"].as_str().unwrap_or("").to_ascii_lowercase();
+    let protocol = entry["protocol"].as_str().unwrap_or("").trim().to_ascii_lowercase();
+
+    if ext == "mhtml" || note.contains("storyboard") {
+        return None;
+    }
+    // Only allow direct HTTP/HTTPS byte-streams (skip HLS m3u8 / DASH mpd / RTMP / etc.)
+    if !matches!(protocol.as_str(), "https" | "http") {
+        return None;
+    }
+
+    let vcodec = entry["vcodec"].as_str().unwrap_or("none").trim().to_string();
+    let acodec = entry["acodec"].as_str().unwrap_or("none").trim().to_string();
+    if vcodec == "none" && acodec == "none" {
+        return None;
+    }
+
+    let entry_headers = entry["http_headers"].as_object();
+    let user_agent = header_lookup_ci(entry_headers, "User-Agent")
+        .or_else(|| header_lookup_ci(fallback_headers, "User-Agent"));
+    let referer = header_lookup_ci(entry_headers, "Referer")
+        .or_else(|| header_lookup_ci(fallback_headers, "Referer"));
+    let cookie_header = header_lookup_ci(entry_headers, "Cookie")
+        .or_else(|| header_lookup_ci(fallback_headers, "Cookie"));
+
+    let filesize = entry["filesize"]
+        .as_u64()
+        .or_else(|| entry["filesize_approx"].as_u64())
+        .filter(|&n| n > 0);
+    let height = entry["height"].as_u64().filter(|&h| h > 0);
+    let fps = entry["fps"].as_f64().map(|f| f.round() as u64).filter(|&f| f > 0);
+    let tbr_kbps = entry["tbr"]
+        .as_f64()
+        .map(|v| (v * 100.0).round() as u64)
+        .unwrap_or(0);
+    let abr_kbps = entry["abr"]
+        .as_f64()
+        .map(|v| (v * 100.0).round() as u64)
+        .unwrap_or(0);
+
+    Some(ResolvedHttpStream {
+        url: url.to_string(),
+        ext,
+        vcodec,
+        acodec,
+        filesize,
+        height,
+        fps,
+        tbr_kbps,
+        abr_kbps,
+        user_agent,
+        referer,
+        cookie_header,
+    })
+}
+
+fn parse_requested_height(format_id: Option<&str>) -> Option<u64> {
+    let fid = format_id?.trim();
+    if let Some(h) = fid.strip_suffix("p_mp4") {
+        return h.parse::<u64>().ok().filter(|&v| v > 0);
+    }
+    if let Some(h) = fid.strip_suffix('p') {
+        return h.parse::<u64>().ok().filter(|&v| v > 0);
+    }
+    None
+}
+
+fn select_best_audio_stream(
+    streams: &[ResolvedHttpStream],
+    prefer_m4a: bool,
+) -> Option<ResolvedHttpStream> {
+    streams
+        .iter()
+        .filter(|s| s.acodec != "none")
+        .max_by_key(|s| {
+            let pure_audio = u8::from(s.vcodec == "none");
+            let m4a_match = u8::from(
+                prefer_m4a
+                    && (s.ext == "m4a"
+                        || s.acodec.to_ascii_lowercase().starts_with("mp4a")),
+            );
+            let known_size = u8::from(s.filesize.is_some());
+            (
+                pure_audio,
+                m4a_match,
+                s.abr_kbps,
+                s.tbr_kbps,
+                known_size,
+                s.filesize.unwrap_or(0),
+            )
+        })
+        .cloned()
+}
+
+fn video_container_compatibility_score(s: &ResolvedHttpStream, target_ext: &str) -> u8 {
+    let vlow = s.vcodec.to_ascii_lowercase();
+    if target_ext.eq_ignore_ascii_case("mp4") {
+        if s.ext == "mp4" && vlow.starts_with("avc") {
+            4
+        } else if s.ext == "mp4" {
+            3
+        } else if s.ext == "webm" {
+            2
+        } else {
+            1
+        }
+    } else if s.ext.eq_ignore_ascii_case(target_ext) {
+        4
+    } else {
+        2
+    }
+}
+
+/// Inspects a `yt-dlp --dump-single-json` document and resolves direct HTTP(S) progressive or
+/// split video+audio track URLs so `core_engine::Downloader` can fetch them with up to 32
+/// concurrent HTTP `Range` connections instead of falling back to single-socket `yt-dlp`.
+/// Returns `None` for HLS/DASH manifests or when split tracks require missing FFmpeg.
+pub fn extract_direct_stream_plan(
+    json: &serde_json::Value,
+    format_id: Option<&str>,
+    target_ext: &str,
+    want_audio_only: bool,
+    allow_split: bool,
+) -> Option<VideoStreamPlan> {
+    let root_headers = json["http_headers"].as_object();
+    let clean_target_ext = target_ext.trim().to_ascii_lowercase();
+    let effective_target_ext = if clean_target_ext.is_empty() {
+        "mp4"
+    } else {
+        clean_target_ext.as_str()
+    };
+    let requested_max_h = parse_requested_height(format_id);
+    let audio_mode = want_audio_only
+        || matches!(format_id, Some("audio_mp3") | Some("audio_m4a"));
+
+    // 1. Select cleanly from full `formats` array first so cached inspect metadata
+    // honors the user's exact format/resolution choice (rather than yt-dlp's default requested_formats).
+    if let Some(formats_arr) = json["formats"].as_array().filter(|a| !a.is_empty()) {
+        let direct_streams: Vec<ResolvedHttpStream> = formats_arr
+            .iter()
+            .filter_map(|f| parse_direct_http_stream(f, root_headers))
+            .collect();
+
+        if !direct_streams.is_empty() {
+            let prefer_m4a = effective_target_ext == "mp4"
+                || effective_target_ext == "m4a"
+                || format_id == Some("audio_m4a");
+
+            if audio_mode {
+                if let Some(best_audio) = select_best_audio_stream(
+                    &direct_streams,
+                    format_id == Some("audio_m4a") || effective_target_ext == "m4a",
+                ) {
+                    return Some(VideoStreamPlan::SingleStream(best_audio));
+                }
+            } else {
+                // Exact custom format ID lookup if caller passed raw yt-dlp format id (e.g. "22", "137")
+                if let Some(fid) = format_id.map(str::trim).filter(|s| !s.is_empty()) {
+                    if requested_max_h.is_none() {
+                        if let Some(raw_match) = formats_arr
+                            .iter()
+                            .find(|f| f["format_id"].as_str() == Some(fid))
+                            .and_then(|f| parse_direct_http_stream(f, root_headers))
+                        {
+                            if raw_match.acodec != "none" && raw_match.vcodec != "none" {
+                                return Some(VideoStreamPlan::SingleStream(raw_match));
+                            } else if raw_match.vcodec != "none" && allow_split {
+                                if let Some(audio) = select_best_audio_stream(&direct_streams, prefer_m4a) {
+                                    return Some(VideoStreamPlan::SplitVideoAudio {
+                                        video: raw_match,
+                                        audio,
+                                    });
+                                }
+                            } else if raw_match.acodec != "none" {
+                                return Some(VideoStreamPlan::SingleStream(raw_match));
+                            }
+                        }
+                    }
+                }
+
+                let best_audio = select_best_audio_stream(&direct_streams, prefer_m4a);
+
+                // Candidate video streams must either contain audio or be pairable via FFmpeg muxing.
+                let eligible_videos: Vec<&ResolvedHttpStream> = direct_streams
+                    .iter()
+                    .filter(|s| {
+                        s.vcodec != "none" && (s.acodec != "none" || (allow_split && best_audio.is_some()))
+                    })
+                    .collect();
+
+                if !eligible_videos.is_empty() {
+                    let under_cap: Vec<&ResolvedHttpStream> = match requested_max_h {
+                        Some(cap) => {
+                            let filtered: Vec<&ResolvedHttpStream> = eligible_videos
+                                .iter()
+                                .copied()
+                                .filter(|s| s.height.map_or(false, |h| h <= cap))
+                                .collect();
+                            if filtered.is_empty() {
+                                eligible_videos
+                            } else {
+                                filtered
+                            }
+                        }
+                        None => eligible_videos,
+                    };
+
+                    if let Some(chosen_video) = under_cap
+                        .into_iter()
+                        .max_by_key(|s| {
+                            let h = s.height.unwrap_or(0);
+                            let compat = video_container_compatibility_score(s, effective_target_ext);
+                            let progressive_bonus = if !allow_split && s.acodec != "none" { 1u8 } else { 0u8 };
+                            let fps = s.fps.unwrap_or(0);
+                            let size_or_tbr = s.filesize.unwrap_or(s.tbr_kbps);
+                            (h, progressive_bonus, compat, fps, size_or_tbr)
+                        })
+                        .cloned()
+                    {
+                        if chosen_video.acodec != "none" {
+                            return Some(VideoStreamPlan::SingleStream(chosen_video));
+                        }
+                        if allow_split {
+                            if let Some(audio) = best_audio {
+                                return Some(VideoStreamPlan::SplitVideoAudio {
+                                    video: chosen_video,
+                                    audio,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to pre-resolved `requested_formats` (when `formats` had no direct streams).
+    if let Some(req_arr) = json["requested_formats"].as_array().filter(|a| !a.is_empty()) {
+        let mut resolved = Vec::with_capacity(req_arr.len());
+        let mut all_direct = true;
+        for item in req_arr {
+            if let Some(s) = parse_direct_http_stream(item, root_headers) {
+                resolved.push(s);
+            } else {
+                all_direct = false;
+                break;
+            }
+        }
+        if all_direct && !resolved.is_empty() {
+            if audio_mode {
+                let prefer_m4a = effective_target_ext == "m4a"
+                    || format_id == Some("audio_m4a");
+                if let Some(best_a) = select_best_audio_stream(&resolved, prefer_m4a)
+                    .or_else(|| resolved.into_iter().last())
+                {
+                    return Some(VideoStreamPlan::SingleStream(best_a));
+                }
+            } else if resolved.len() == 1 {
+                let only = resolved.into_iter().next()?;
+                if requested_max_h.map_or(true, |cap| only.height.map_or(true, |h| h <= cap)) {
+                    return Some(VideoStreamPlan::SingleStream(only));
+                }
+            } else if allow_split && resolved.len() >= 2 {
+                if let (Some(video), Some(audio)) = (
+                    resolved.iter().find(|s| s.vcodec != "none").cloned(),
+                    resolved
+                        .iter()
+                        .find(|s| s.vcodec == "none" && s.acodec != "none")
+                        .or_else(|| resolved.iter().rfind(|s| s.acodec != "none"))
+                        .cloned(),
+                ) {
+                    if requested_max_h.map_or(true, |cap| video.height.map_or(true, |h| h <= cap)) {
+                        return Some(VideoStreamPlan::SplitVideoAudio { video, audio });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Single-stream top-level URL fallback (when extractor returns direct stream object)
+    if let Some(single) = parse_direct_http_stream(json, root_headers) {
+        if !audio_mode || single.acodec != "none" {
+            return Some(VideoStreamPlan::SingleStream(single));
+        }
+    }
+
+    None
+}
+
+/// Computes unified monotonic progress telemetry across sequential video + audio HTTP phases
+/// before FFmpeg container muxing.
+pub fn compute_split_phase_telemetry(
+    prior_bytes: u64,
+    phase_downloaded: u64,
+    combined_total_bytes: u64,
+    speed_bytes_per_sec: u64,
+    max_pct_before_mux: f64,
+) -> CompositePhaseProgress {
+    let downloaded_bytes = prior_bytes.saturating_add(phase_downloaded);
+    let has_known_total = combined_total_bytes > 0;
+    let total_bytes = if has_known_total {
+        combined_total_bytes.max(downloaded_bytes)
+    } else {
+        downloaded_bytes
+    };
+    let cap = max_pct_before_mux.clamp(1.0, 99.5);
+
+    let progress_percent = if has_known_total {
+        ((downloaded_bytes as f64 / total_bytes as f64) * cap).clamp(1.0, cap)
+    } else if downloaded_bytes > 0 {
+        let mb = downloaded_bytes as f64 / (1024.0 * 1024.0);
+        ((1.0 - (-mb / 8.0).exp()) * (cap - 5.0) + 5.0).clamp(2.0, cap)
+    } else {
+        1.0
+    };
+
+    let eta_seconds =
+        if has_known_total && speed_bytes_per_sec > 0 && combined_total_bytes > downloaded_bytes {
+            Some(
+                ((combined_total_bytes - downloaded_bytes) as f64 / speed_bytes_per_sec as f64)
+                    .ceil() as u64,
+            )
+        } else if has_known_total && downloaded_bytes >= combined_total_bytes {
+            Some(1)
+        } else {
+            None
+        };
+
+    CompositePhaseProgress {
+        downloaded_bytes,
+        total_bytes,
+        progress_percent,
+        eta_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,5 +1408,250 @@ mod tests {
         assert!(slip_res.is_err());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_extract_direct_stream_plan_selections_and_manifest_filtering() {
+        // 1. Pre-resolved requested_formats with per-format HTTP headers
+        let req_json = serde_json::json!({
+            "http_headers": {
+                "User-Agent": "RootUA/1.0",
+                "Referer": "https://www.youtube.com/watch?v=WkKtsgji7yo"
+            },
+            "requested_formats": [
+                {
+                    "format_id": "137",
+                    "url": "https://rr1---sn.googlevideo.com/videoplayback?itag=137",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": "avc1.640028",
+                    "acodec": "none",
+                    "height": 1080,
+                    "fps": 60,
+                    "filesize": 900_000_000u64,
+                    "http_headers": {
+                        "Cookie": "GPS=1"
+                    }
+                },
+                {
+                    "format_id": "140",
+                    "url": "https://rr1---sn.googlevideo.com/videoplayback?itag=140",
+                    "ext": "m4a",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "abr": 128.0,
+                    "filesize": 20_000_000u64
+                }
+            ]
+        });
+
+        let split_plan = extract_direct_stream_plan(&req_json, Some("1080p_mp4"), "mp4", false, true)
+            .expect("split direct HTTP plan should resolve");
+        match split_plan {
+            VideoStreamPlan::SplitVideoAudio { video, audio } => {
+                assert_eq!(video.filesize, Some(900_000_000));
+                assert_eq!(video.user_agent.as_deref(), Some("RootUA/1.0"));
+                assert_eq!(video.referer.as_deref(), Some("https://www.youtube.com/watch?v=WkKtsgji7yo"));
+                assert_eq!(video.cookie_header.as_deref(), Some("GPS=1"));
+                assert_eq!(audio.ext, "m4a");
+                assert_eq!(audio.filesize, Some(20_000_000));
+            }
+            other => panic!("expected SplitVideoAudio, got {:?}", other),
+        }
+
+        // 2. Full formats array selection: storyboard & m3u8 filtered, 1080p AVC + M4A chosen
+        let formats_json = serde_json::json!({
+            "http_headers": { "User-Agent": "TestUA" },
+            "formats": [
+                {
+                    "format_id": "sb0",
+                    "url": "https://i.ytimg.com/sb/storyboard.mhtml",
+                    "ext": "mhtml",
+                    "format_note": "storyboard",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "none"
+                },
+                {
+                    "format_id": "hls1",
+                    "url": "https://manifest.googlevideo.com/api/manifest/hls_playlist/index.m3u8?foo=1",
+                    "ext": "mp4",
+                    "protocol": "m3u8_native",
+                    "vcodec": "avc1",
+                    "acodec": "mp4a.40.2",
+                    "height": 1080
+                },
+                {
+                    "format_id": "18",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=18",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": "avc1.42001E",
+                    "acodec": "mp4a.40.2",
+                    "height": 360,
+                    "filesize": 120_000_000u64
+                },
+                {
+                    "format_id": "137",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=137",
+                    "ext": "mp4",
+                    "protocol": "https",
+                    "vcodec": "avc1.640028",
+                    "acodec": "none",
+                    "height": 1080,
+                    "fps": 60,
+                    "filesize": 900_000_000u64
+                },
+                {
+                    "format_id": "248",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=248",
+                    "ext": "webm",
+                    "protocol": "https",
+                    "vcodec": "vp9",
+                    "acodec": "none",
+                    "height": 1080,
+                    "fps": 60,
+                    "filesize": 800_000_000u64
+                },
+                {
+                    "format_id": "313",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=313",
+                    "ext": "webm",
+                    "protocol": "https",
+                    "vcodec": "vp9",
+                    "acodec": "none",
+                    "height": 2160,
+                    "fps": 60,
+                    "filesize": 2_400_000_000u64
+                },
+                {
+                    "format_id": "140",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=140",
+                    "ext": "m4a",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "abr": 128.0,
+                    "filesize": 20_000_000u64
+                },
+                {
+                    "format_id": "251",
+                    "url": "https://rr2.googlevideo.com/videoplayback?itag=251",
+                    "ext": "webm",
+                    "protocol": "https",
+                    "vcodec": "none",
+                    "acodec": "opus",
+                    "abr": 160.0,
+                    "filesize": 25_000_000u64
+                }
+            ]
+        });
+
+        let plan_1080 = extract_direct_stream_plan(&formats_json, Some("1080p_mp4"), "mp4", false, true)
+            .expect("1080p_mp4 should resolve");
+        match plan_1080 {
+            VideoStreamPlan::SplitVideoAudio { video, audio } => {
+                assert_eq!(video.height, Some(1080));
+                assert!(video.vcodec.starts_with("avc1"), "Expected AVC MP4 for 1080p_mp4");
+                assert_eq!(audio.ext, "m4a", "Expected M4A companion for MP4 mux");
+            }
+            other => panic!("expected SplitVideoAudio, got {:?}", other),
+        }
+
+        let plan_4k = extract_direct_stream_plan(&formats_json, Some("2160p"), "webm", false, true)
+            .expect("2160p should resolve");
+        match plan_4k {
+            VideoStreamPlan::SplitVideoAudio { video, audio } => {
+                assert_eq!(video.height, Some(2160));
+                assert_eq!(audio.ext, "webm", "Expected best opus for webm");
+            }
+            other => panic!("expected SplitVideoAudio, got {:?}", other),
+        }
+
+        // Without FFmpeg split allowed, falls back to progressive SingleStream (itag 18)
+        let plan_prog = extract_direct_stream_plan(&formats_json, Some("1080p_mp4"), "mp4", false, false)
+            .expect("no-split fallback should pick progressive 360p");
+        match plan_prog {
+            VideoStreamPlan::SingleStream(s) => assert_eq!(s.height, Some(360)),
+            other => panic!("expected SingleStream, got {:?}", other),
+        }
+
+        // Audio-only selection
+        let plan_mp3 = extract_direct_stream_plan(&formats_json, Some("audio_mp3"), "mp3", true, true)
+            .expect("audio_mp3 should resolve highest bitrate pure audio");
+        match plan_mp3 {
+            VideoStreamPlan::SingleStream(s) => assert_eq!(s.acodec, "opus"),
+            other => panic!("expected SingleStream, got {:?}", other),
+        }
+
+        let plan_m4a = extract_direct_stream_plan(&formats_json, Some("audio_m4a"), "m4a", true, true)
+            .expect("audio_m4a should prefer m4a");
+        match plan_m4a {
+            VideoStreamPlan::SingleStream(s) => assert_eq!(s.ext, "m4a"),
+            other => panic!("expected SingleStream, got {:?}", other),
+        }
+
+        // When cached inspect JSON includes yt-dlp's default requested_formats (e.g. 2160p),
+        // requested 360p or audio_mp3 must still honor caller selection from `formats`.
+        let mut mixed_json = formats_json.clone();
+        mixed_json["requested_formats"] = serde_json::json!([
+            {
+                "format_id": "313",
+                "url": "https://rr2.googlevideo.com/videoplayback?itag=313",
+                "ext": "webm",
+                "protocol": "https",
+                "vcodec": "vp9",
+                "acodec": "none",
+                "height": 2160
+            },
+            {
+                "format_id": "251",
+                "url": "https://rr2.googlevideo.com/videoplayback?itag=251",
+                "ext": "webm",
+                "protocol": "https",
+                "vcodec": "none",
+                "acodec": "opus"
+            }
+        ]);
+        match extract_direct_stream_plan(&mixed_json, Some("360p_mp4"), "mp4", false, true).unwrap() {
+            VideoStreamPlan::SingleStream(s) => assert_eq!(s.height, Some(360)),
+            other => panic!("expected 360p progressive SingleStream, got {:?}", other),
+        }
+        match extract_direct_stream_plan(&mixed_json, Some("audio_mp3"), "mp3", true, true).unwrap() {
+            VideoStreamPlan::SingleStream(s) => assert_eq!(s.vcodec, "none"),
+            other => panic!("expected audio-only SingleStream, got {:?}", other),
+        }
+
+        // Pure HLS manifest document must return None
+        let hls_only = serde_json::json!({
+            "formats": [{
+                "format_id": "hls",
+                "url": "https://cdn.example.com/live/master.m3u8",
+                "ext": "mp4",
+                "protocol": "m3u8_native",
+                "vcodec": "avc1",
+                "acodec": "mp4a.40.2"
+            }]
+        });
+        assert!(extract_direct_stream_plan(&hls_only, None, "mp4", false, true).is_none());
+    }
+
+    #[test]
+    fn test_compute_split_phase_telemetry() {
+        let p1 = compute_split_phase_telemetry(0, 500, 1000, 100, 96.0);
+        assert_eq!(p1.downloaded_bytes, 500);
+        assert_eq!(p1.total_bytes, 1000);
+        assert!((p1.progress_percent - 48.0).abs() < 0.01);
+        assert_eq!(p1.eta_seconds, Some(5));
+
+        let p2 = compute_split_phase_telemetry(800, 200, 1000, 200, 96.0);
+        assert_eq!(p2.downloaded_bytes, 1000);
+        assert!((p2.progress_percent - 96.0).abs() < 0.01);
+        assert_eq!(p2.eta_seconds, Some(1));
+
+        let p_unknown = compute_split_phase_telemetry(0, 2 * 1024 * 1024, 0, 0, 96.0);
+        assert!(p_unknown.progress_percent > 5.0 && p_unknown.progress_percent <= 96.0);
+        assert_eq!(p_unknown.eta_seconds, None);
     }
 }

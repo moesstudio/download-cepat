@@ -48,6 +48,7 @@ import {
   downloadAndInstallAppUpdate,
   openExternalUrl,
   setTrayLanguage,
+  syncRuntimeSettings,
   isTauri,
 } from './services/nativeBridge.ts';
 import {
@@ -230,10 +231,29 @@ export const App: React.FC = () => {
     defaultConnections: number;
   }
 
+  const normalizeConnections = (val: unknown): number => {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n < 1) return 8;
+    return Math.min(32, Math.max(1, Math.round(n)));
+  };
+
+  const normalizeMaxTasks = (val: unknown): number => {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n < 1) return 2;
+    return Math.min(10, Math.max(1, Math.round(n)));
+  };
+
   const [settings, setSettings] = useState<AppSettings>(() => {
     try {
       const saved = localStorage.getItem('download_cepat_settings');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          speedLimitKbs: Math.max(0, Number(parsed?.speedLimitKbs) || 0),
+          maxTasks: normalizeMaxTasks(parsed?.maxTasks),
+          defaultConnections: normalizeConnections(parsed?.defaultConnections),
+        };
+      }
     } catch {}
     return { speedLimitKbs: 0, maxTasks: 2, defaultConnections: 8 };
   });
@@ -303,6 +323,29 @@ export const App: React.FC = () => {
       localStorage.setItem('download_cepat_category_rules', JSON.stringify(categoryRules));
     } catch {}
   }, [categoryRules]);
+
+  const pushRuntimeSettingsToCore = (
+    nextSettings: AppSettings,
+    nextProxy: ProxyConfig,
+    nextRules: CategoryRule[]
+  ) => {
+    const videoDir =
+      nextRules.find((r) => r.id === 'video')?.saveDir || '~/Downloads/Video';
+    const musicDir =
+      nextRules.find((r) => r.id === 'music')?.saveDir || '~/Downloads/Music';
+    void syncRuntimeSettings({
+      defaultConnections: normalizeConnections(nextSettings.defaultConnections),
+      maxTasks: normalizeMaxTasks(nextSettings.maxTasks),
+      speedLimitKbs: Math.max(0, Number(nextSettings.speedLimitKbs) || 0),
+      proxyUrl: formatProxyUrl(nextProxy) || null,
+      videoSaveDir: videoDir,
+      musicSaveDir: musicDir,
+    });
+  };
+
+  useEffect(() => {
+    pushRuntimeSettingsToCore(settings, proxyConfig, categoryRules);
+  }, [settings, proxyConfig, categoryRules]);
 
   const dynamicCategories = React.useMemo<Category[]>(() => {
     return INITIAL_CATEGORIES.map((base) => {
@@ -719,15 +762,20 @@ export const App: React.FC = () => {
         resolution?: string;
         numConnections?: number;
         status: string;
+        cookie?: string;
+        referer?: string;
+        userAgent?: string;
+        proxyUrl?: string;
+        speedLimitBytesPerSec?: number;
       }>('external-task-added', (event) => {
         const p = event.payload;
         if (!p || !p.id) return;
         const currentSettings = settingsRef.current;
-        const currentTasks = tasksRef.current;
-        const activeCount = currentTasks.filter(
-          (t) => t.status === 'downloading' || t.status === 'connecting'
-        ).length;
-        const isQueued = activeCount >= currentSettings.maxTasks;
+        const isQueued = p.status === 'queued';
+        const resolvedSpeedLimit =
+          typeof p.speedLimitBytesPerSec === 'number'
+            ? p.speedLimitBytesPerSec
+            : currentSettings.speedLimitKbs * 1024;
         const newTask: DownloadTask = {
           id: p.id,
           url: p.url,
@@ -735,7 +783,7 @@ export const App: React.FC = () => {
           destinationPath: p.destinationPath,
           fileSize: null,
           downloadedBytes: 0,
-          speedBytesPerSec: isQueued ? 0 : 2_500_000,
+          speedBytesPerSec: isQueued ? 0 : (isTauri() ? 0 : 2_500_000),
           progressPercent: 0,
           status: isQueued ? 'queued' : 'downloading',
           categoryId: p.categoryId,
@@ -743,7 +791,11 @@ export const App: React.FC = () => {
           resolution: p.resolution,
           supportsRange: true,
           numConnections: p.numConnections || currentSettings.defaultConnections,
-          speedLimitBytesPerSec: currentSettings.speedLimitKbs * 1024,
+          speedLimitBytesPerSec: resolvedSpeedLimit,
+          cookie: p.cookie,
+          referer: p.referer,
+          userAgent: p.userAgent,
+          proxyUrl: p.proxyUrl || formatProxyUrl(proxyRef.current),
           createdAt: new Date().toISOString(),
         };
         setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== p.id)]);
@@ -1045,39 +1097,6 @@ export const App: React.FC = () => {
   });
 
   const selectedTask = tasks.find((t) => t.id === selectedTaskId);
-
-  // Concurrency queue scheduler: automatically start queued tasks when active slots free up
-  useEffect(() => {
-    const activeCount = tasks.filter((t) => t.status === 'downloading' || t.status === 'connecting').length;
-    if (activeCount < settings.maxTasks) {
-      const nextQueued = tasks.find((t) => t.status === 'queued');
-      if (nextQueued) {
-        setTasks((prev) =>
-          prev.map((t) =>
-            t.id === nextQueued.id ? { ...t, status: 'downloading', speedBytesPerSec: 2_500_000 } : t
-          )
-        );
-        triggerRealDownload(
-          nextQueued.id,
-          nextQueued.url,
-          nextQueued.destinationPath,
-          nextQueued.numConnections || settings.defaultConnections,
-          nextQueued.formatId,
-          {
-            cookie: nextQueued.cookie,
-            referer: nextQueued.referer,
-            userAgent: nextQueued.userAgent,
-          },
-          settings.speedLimitKbs,
-          false
-        );
-        showToast(
-          translate(langRef.current, 'toast.queueNextStarted', { name: nextQueued.fileName }),
-          'info'
-        );
-      }
-    }
-  }, [tasks, settings.maxTasks, settings.defaultConnections, settings.speedLimitKbs]);
 
   // Actions
   const handleStartNewDownload = (
@@ -1871,24 +1890,34 @@ export const App: React.FC = () => {
         onInstallUpdate={() => void handleInstallUpdate()}
         onChangeLanguage={handleNotifyLanguageChange}
         onSaveSpeedLimit={(limitKbs) => {
-          setSpeedLimitKbs(limitKbs);
-          void updateDownloadSpeedLimit(limitKbs);
+          const safeLimit = Math.max(0, Number(limitKbs) || 0);
+          setSpeedLimitKbs(safeLimit);
+          pushRuntimeSettingsToCore(
+            { ...settings, speedLimitKbs: safeLimit },
+            proxyConfig,
+            categoryRules
+          );
+          void updateDownloadSpeedLimit(safeLimit);
         }}
         onSaveSettings={(newSettings) => {
-          setSettings({
-            speedLimitKbs: newSettings.speedLimitKbs,
-            maxTasks: newSettings.maxTasks,
-            defaultConnections: newSettings.defaultConnections,
-          });
+          const normalizedNext: AppSettings = {
+            speedLimitKbs: Math.max(0, Number(newSettings.speedLimitKbs) || 0),
+            maxTasks: normalizeMaxTasks(newSettings.maxTasks),
+            defaultConnections: normalizeConnections(newSettings.defaultConnections),
+          };
+          const nextProxy = newSettings.proxyConfig || proxyConfig;
+          const nextRules = newSettings.categoryRules || categoryRules;
+          setSettings(normalizedNext);
           if (newSettings.proxyConfig) setProxyConfig(newSettings.proxyConfig);
           if (newSettings.siteLogins) setSiteLogins(newSettings.siteLogins);
           if (newSettings.categoryRules) setCategoryRules(newSettings.categoryRules);
           if (newSettings.clipboardConfig) setClipboardConfig(newSettings.clipboardConfig);
-          void updateDownloadSpeedLimit(newSettings.speedLimitKbs);
+          pushRuntimeSettingsToCore(normalizedNext, nextProxy, nextRules);
+          void updateDownloadSpeedLimit(normalizedNext.speedLimitKbs);
           showToast(
             translate(langRef.current, 'toast.settingsSaved', {
-              threads: newSettings.defaultConnections,
-              max: newSettings.maxTasks,
+              threads: normalizedNext.defaultConnections,
+              max: normalizedNext.maxTasks,
             }),
             'success'
           );

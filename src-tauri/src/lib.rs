@@ -67,6 +67,131 @@ fn active_ui_language() -> &'static Mutex<String> {
     LANG.get_or_init(|| Mutex::new("id".to_string()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuntimeDownloadSettings {
+    pub default_connections: usize,
+    pub max_tasks: usize,
+    pub speed_limit_kbs: u64,
+    pub proxy_url: Option<String>,
+    pub video_save_dir: String,
+    pub music_save_dir: String,
+}
+
+impl Default for RuntimeDownloadSettings {
+    fn default() -> Self {
+        Self {
+            default_connections: 8,
+            max_tasks: 2,
+            speed_limit_kbs: 0,
+            proxy_url: None,
+            video_save_dir: "~/Downloads/Video".to_string(),
+            music_save_dir: "~/Downloads/Music".to_string(),
+        }
+    }
+}
+
+fn normalize_runtime_settings(mut s: RuntimeDownloadSettings) -> RuntimeDownloadSettings {
+    s.default_connections = s.default_connections.clamp(1, 32);
+    s.max_tasks = s.max_tasks.clamp(1, 10);
+    s.proxy_url = s
+        .proxy_url
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    s.video_save_dir = if s.video_save_dir.trim().is_empty() {
+        "~/Downloads/Video".to_string()
+    } else {
+        s.video_save_dir.trim().to_string()
+    };
+    s.music_save_dir = if s.music_save_dir.trim().is_empty() {
+        "~/Downloads/Music".to_string()
+    } else {
+        s.music_save_dir.trim().to_string()
+    };
+    s
+}
+
+fn runtime_settings_file_path() -> Option<PathBuf> {
+    user_home_dir().map(|h| h.join(".download-cepat").join("runtime_settings.json"))
+}
+
+fn load_runtime_settings_from_path(path: &Path) -> RuntimeDownloadSettings {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<RuntimeDownloadSettings>(&raw) {
+            Ok(parsed) => normalize_runtime_settings(parsed),
+            Err(_) => RuntimeDownloadSettings::default(),
+        },
+        Err(_) => RuntimeDownloadSettings::default(),
+    }
+}
+
+fn save_runtime_settings_to_path(
+    path: &Path,
+    settings: &RuntimeDownloadSettings,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Gagal membuat folder pengaturan runtime: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Gagal serialisasi pengaturan runtime: {}", e))?;
+    std::fs::write(path, json)
+        .map_err(|e| format!("Gagal menyimpan pengaturan runtime: {}", e))
+}
+
+fn runtime_settings_store() -> &'static Mutex<Option<RuntimeDownloadSettings>> {
+    static STORE: OnceLock<Mutex<Option<RuntimeDownloadSettings>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(None))
+}
+
+fn get_runtime_settings() -> RuntimeDownloadSettings {
+    if let Ok(mut guard) = runtime_settings_store().lock() {
+        if let Some(ref cached) = *guard {
+            return cached.clone();
+        }
+        let loaded = runtime_settings_file_path()
+            .map(|p| load_runtime_settings_from_path(&p))
+            .unwrap_or_default();
+        *guard = Some(loaded.clone());
+        return loaded;
+    }
+    RuntimeDownloadSettings::default()
+}
+
+#[tauri::command]
+fn sync_runtime_settings(settings: RuntimeDownloadSettings) -> RuntimeDownloadSettings {
+    let normalized = normalize_runtime_settings(settings);
+    if let Ok(mut guard) = runtime_settings_store().lock() {
+        *guard = Some(normalized.clone());
+    }
+    if let Some(path) = runtime_settings_file_path() {
+        if let Err(e) = save_runtime_settings_to_path(&path, &normalized) {
+            log::warn!("Gagal menyimpan runtime_settings.json: {}", e);
+        }
+    }
+    normalized
+}
+
+fn join_save_dir_and_file(save_dir: &str, file_name: &str) -> String {
+    let dir = save_dir.trim();
+    if dir.is_empty() {
+        return file_name.to_string();
+    }
+    let sep = if dir.contains('\\') && !dir.starts_with("~/") && !dir.starts_with('/') {
+        '\\'
+    } else {
+        '/'
+    };
+    let trimmed = dir.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() && (dir == "/" || dir == "\\") {
+        return format!("{}{}", dir, file_name);
+    }
+    if trimmed.len() == 2 && trimmed.ends_with(':') {
+        return format!("{}\\{}", trimmed, file_name);
+    }
+    format!("{}{}{}", trimmed, sep, file_name)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildInfo {
@@ -267,8 +392,12 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
                         let temp_stem = ts.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
                         !temp_stem.is_empty() && is_ytdlp_stream_fragment_file(&name, temp_stem)
                     });
+                let split_temp = !target_name.is_empty()
+                    && (name.starts_with(&format!("{}.vtmp.", target_name))
+                        || name.starts_with(&format!("{}.atmp.", target_name))
+                        || name.starts_with(&format!("{}.mux.", target_name)));
 
-                if target_frag || temp_frag || stream_split {
+                if target_frag || temp_frag || stream_split || split_temp {
                     remove_if_exists(&path);
                 }
             }
@@ -941,6 +1070,7 @@ async fn inspect_video_url(url: &str) -> Result<InspectResult, String> {
     inspect_video_url_with_headers(url, None, None, None).await
 }
 
+#[allow(dead_code)]
 async fn inspect_video_url_with_headers(
     url: &str,
     cookie: Option<&str>,
@@ -973,10 +1103,87 @@ fn video_inspect_coordinator() -> &'static core_engine::VideoInspectCoordinator 
     COORDINATOR.get_or_init(core_engine::VideoInspectCoordinator::new)
 }
 
-async fn run_ytdlp_dump_json(
+#[derive(Clone)]
+struct CachedRawYtDlpJson {
+    json: serde_json::Value,
+    stored_at: std::time::Instant,
+}
+
+fn raw_ytdlp_json_cache() -> &'static Mutex<HashMap<String, CachedRawYtDlpJson>> {
+    static RAW_CACHE: OnceLock<Mutex<HashMap<String, CachedRawYtDlpJson>>> = OnceLock::new();
+    RAW_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn raw_video_cache_key(
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+) -> String {
+    let canon = core_engine::video_runtime::canonicalize_video_url(url);
+    let fp = core_engine::video_runtime::inspect_options_fingerprint(
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+    );
+    format!("{}::{}", canon, fp)
+}
+
+fn get_cached_raw_ytdlp_json(key: &str) -> Option<serde_json::Value> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(90);
+    let Ok(mut map) = raw_ytdlp_json_cache().lock() else {
+        return None;
+    };
+    let now = std::time::Instant::now();
+    map.retain(|_, v| now.duration_since(v.stored_at) <= TTL);
+    map.get(key).map(|entry| entry.json.clone())
+}
+
+fn put_cached_raw_ytdlp_json(key: &str, json: &serde_json::Value) {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(90);
+    const MAX_ENTRIES: usize = 16;
+    let Ok(mut map) = raw_ytdlp_json_cache().lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    map.retain(|_, v| now.duration_since(v.stored_at) <= TTL);
+    while map.len() >= MAX_ENTRIES && !map.contains_key(key) {
+        if let Some(oldest_key) = map
+            .iter()
+            .min_by_key(|(_, v)| v.stored_at)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest_key);
+        } else {
+            break;
+        }
+    }
+    map.insert(
+        key.to_string(),
+        CachedRawYtDlpJson {
+            json: json.clone(),
+            stored_at: now,
+        },
+    );
+}
+
+fn invalidate_cached_raw_ytdlp_json(key: &str) {
+    if let Ok(mut map) = raw_ytdlp_json_cache().lock() {
+        map.remove(key);
+    }
+}
+
+async fn run_ytdlp_dump_json_with_selector(
     bin: &str,
     url: &str,
     force_fallback_clients: bool,
+    format_selector: Option<&str>,
     cookie: Option<&str>,
     referer: Option<&str>,
     user_agent: Option<&str>,
@@ -996,6 +1203,9 @@ async fn run_ytdlp_dump_json(
     cmd.arg("--no-playlist");
     cmd.arg("--no-warnings");
     cmd.arg("--no-check-formats");
+    if let Some(sel) = format_selector.map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("-f").arg(sel);
+    }
     apply_ytdlp_headers(&mut cmd, cookie, referer, user_agent);
     apply_ytdlp_network_options(&mut cmd, proxy_url, auth_username, auth_password);
     cmd.arg(url);
@@ -1031,6 +1241,34 @@ async fn run_ytdlp_dump_json(
 
     serde_json::from_slice::<serde_json::Value>(&output.stdout)
         .map_err(|e| format!("Metadata yt-dlp tidak valid: {}", e))
+}
+
+async fn run_ytdlp_dump_json(
+    bin: &str,
+    url: &str,
+    force_fallback_clients: bool,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, String> {
+    run_ytdlp_dump_json_with_selector(
+        bin,
+        url,
+        force_fallback_clients,
+        None,
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+        timeout_secs,
+    )
+    .await
 }
 
 async fn inspect_video_url_with_options(
@@ -1384,6 +1622,17 @@ async fn inspect_video_url_uncached(
     }
 
     let top_size = video_formats.first().and_then(|f| f.file_size_approx);
+
+    let raw_key = raw_video_cache_key(
+        url,
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+    );
+    put_cached_raw_ytdlp_json(&raw_key, &json_val);
 
     Ok(InspectResult {
         url: url.to_string(),
@@ -1798,6 +2047,1225 @@ fn stop_all_real_downloads() -> usize {
     0
 }
 
+fn build_ytdlp_format_selector(
+    format_id: Option<&str>,
+    target_ext: &str,
+    is_audio: bool,
+    has_ffmpeg: bool,
+) -> String {
+    let parse_height_selector = |h: u32| -> String {
+        if has_ffmpeg {
+            format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
+        } else {
+            format!("best[height<={h}][ext=mp4]/best[height<={h}]/best")
+        }
+    };
+    let default_video_selector = if has_ffmpeg {
+        "bestvideo+bestaudio/best".to_string()
+    } else {
+        "best[ext=mp4]/best".to_string()
+    };
+    let default_m4a_selector = if has_ffmpeg {
+        "bestaudio[ext=m4a]/bestaudio/18/best".to_string()
+    } else {
+        "bestaudio[ext=m4a]/best[ext=m4a]/bestaudio/18/best".to_string()
+    };
+
+    if let Some(fid) = format_id {
+        if fid == "audio_mp3" {
+            "bestaudio/18/best".to_string()
+        } else if fid == "audio_m4a" {
+            default_m4a_selector
+        } else if let Some(h_str) = fid.strip_suffix("p_mp4") {
+            if let Ok(h) = h_str.parse::<u32>() {
+                parse_height_selector(h)
+            } else {
+                default_video_selector
+            }
+        } else if let Some(h_str) = fid.strip_suffix('p') {
+            if let Ok(h) = h_str.parse::<u32>() {
+                parse_height_selector(h)
+            } else {
+                default_video_selector
+            }
+        } else if is_audio {
+            if target_ext == "m4a" {
+                default_m4a_selector
+            } else {
+                "bestaudio/18/best".to_string()
+            }
+        } else {
+            default_video_selector
+        }
+    } else if is_audio {
+        if target_ext == "m4a" {
+            default_m4a_selector
+        } else {
+            "bestaudio/18/best".to_string()
+        }
+    } else {
+        default_video_selector
+    }
+}
+
+fn remove_split_temp_files(target: &Path) {
+    if let (Some(parent), Some(target_name)) = (
+        target.parent(),
+        target.file_name().and_then(|n| n.to_str()),
+    ) {
+        if target_name.is_empty() {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                    continue;
+                };
+                if name.starts_with(&format!("{}.vtmp.", target_name))
+                    || name.starts_with(&format!("{}.atmp.", target_name))
+                    || name.starts_with(&format!("{}.mux.", target_name))
+                {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+}
+
+async fn wait_child_with_http_ctrl(
+    mut child: tokio::process::Child,
+    ctrl: Option<&core_engine::DownloadController>,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    match ctrl {
+        Some(c) => {
+            if c.is_stopped() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Ok(None);
+            }
+            tokio::select! {
+                res = child.wait() => res.map(Some),
+                _ = c.notified() => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    Ok(None)
+                }
+            }
+        }
+        None => child.wait().await.map(Some),
+    }
+}
+
+/// Converts a downloaded media/audio stream (`src_audio`) into `target` (`.mp3`, `.m4a`, `.flac`, `.wav`).
+/// Returns `Ok(true)` on conversion success, `Ok(false)` if interrupted via `controller`, or `Err(msg)`.
+async fn convert_audio_stream_to_target(
+    src_audio: &Path,
+    target: &Path,
+    target_ext: &str,
+    ffmpeg_path: Option<&Path>,
+    controller: Option<&core_engine::DownloadController>,
+) -> Result<bool, String> {
+    if controller.map_or(false, |c| c.is_stopped()) {
+        return Ok(false);
+    }
+
+    let mut converted = false;
+    if let Some(home) = user_home_dir() {
+        let converter_script = home.join(".download-cepat").join("bin").join("converter.py");
+        let venv_dir = home.join(".download-cepat").join("venv");
+        let python_candidates = [
+            venv_dir.join("bin").join("python3"),
+            venv_dir.join("Scripts").join("python.exe"),
+        ];
+        let python_bin = python_candidates
+            .into_iter()
+            .find(|p| p.is_file())
+            .or_else(|| find_executable_in_dirs(&["python3", "python"], &default_tool_dirs()));
+
+        if converter_script.is_file() {
+            if let Some(py) = python_bin {
+                let mut conv_cmd = tokio::process::Command::new(&py);
+                hide_window_tokio(&mut conv_cmd);
+                conv_cmd
+                    .arg(&converter_script)
+                    .arg(src_audio)
+                    .arg(target)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                if let Ok(child) = conv_cmd.spawn() {
+                    match wait_child_with_http_ctrl(child, controller).await {
+                        Ok(None) => return Ok(false),
+                        Ok(Some(c_status)) if c_status.success() => {
+                            converted = std::fs::metadata(target)
+                                .map(|m| m.is_file() && m.len() > 0)
+                                .unwrap_or(false);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    if !converted {
+        if let Some(ff_path) = ffmpeg_path {
+            let mut ff_cmd = tokio::process::Command::new(ff_path);
+            hide_window_tokio(&mut ff_cmd);
+            ff_cmd.arg("-y").arg("-i").arg(src_audio).arg("-vn");
+            match target_ext {
+                "mp3" => {
+                    ff_cmd.args(["-c:a", "libmp3lame", "-b:a", "256k"]);
+                }
+                "m4a" => {
+                    ff_cmd.args([
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "256k",
+                        "-movflags",
+                        "+faststart",
+                    ]);
+                }
+                "flac" => {
+                    ff_cmd.args(["-c:a", "flac"]);
+                }
+                "wav" => {
+                    ff_cmd.args(["-c:a", "pcm_s16le"]);
+                }
+                _ => {}
+            }
+            ff_cmd
+                .arg(target)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(child) = ff_cmd.spawn() {
+                match wait_child_with_http_ctrl(child, controller).await {
+                    Ok(None) => return Ok(false),
+                    Ok(Some(ff_status)) if ff_status.success() => {
+                        converted = std::fs::metadata(target)
+                            .map(|m| m.is_file() && m.len() > 0)
+                            .unwrap_or(false);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !converted {
+        #[cfg(target_os = "macos")]
+        {
+            if controller.map_or(false, |c| c.is_stopped()) {
+                return Ok(false);
+            }
+            let mut m4a_path = target.to_path_buf();
+            m4a_path.set_extension("m4a");
+            let mut af_cmd = tokio::process::Command::new("afconvert");
+            af_cmd
+                .arg("-f")
+                .arg("m4af")
+                .arg("-d")
+                .arg("aac")
+                .arg(src_audio)
+                .arg(&m4a_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(child) = af_cmd.spawn() {
+                match wait_child_with_http_ctrl(child, controller).await {
+                    Ok(None) => return Ok(false),
+                    Ok(Some(_)) => {
+                        if target != m4a_path.as_path() && !target.exists() && m4a_path.exists() {
+                            let _ = std::fs::copy(&m4a_path, target);
+                        }
+                        if std::fs::metadata(target)
+                            .map(|m| m.is_file() && m.len() > 0)
+                            .unwrap_or(false)
+                        {
+                            converted = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !converted && target_ext == "m4a" && src_audio.is_file() {
+        let is_isobmff = std::fs::File::open(src_audio)
+            .and_then(|mut f| {
+                use std::io::Read;
+                let mut hdr = [0u8; 12];
+                f.read_exact(&mut hdr).map(|_| &hdr[4..8] == b"ftyp")
+            })
+            .unwrap_or(false);
+        if is_isobmff && move_file_cross_device(src_audio, target).is_ok() {
+            converted = std::fs::metadata(target)
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false);
+        }
+    }
+
+    let _ = std::fs::remove_file(src_audio);
+
+    if converted {
+        Ok(true)
+    } else {
+        Err(format!(
+            "Gagal mengonversi audio ke .{}. Pasang FFmpeg di sistem agar konversi audio (MP3/M4A) dapat berjalan.",
+            target_ext
+        ))
+    }
+}
+
+fn resolve_stream_request_headers<'a>(
+    stream: &'a core_engine::video_runtime::ResolvedHttpStream,
+    is_youtube: bool,
+    caller_cookie: Option<&'a str>,
+    caller_referer: Option<&'a str>,
+    caller_ua: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+    let eff_ua = stream.user_agent.as_deref().or(caller_ua);
+    let eff_referer = stream.referer.as_deref().or(caller_referer);
+    let eff_cookie = if stream.cookie_header.is_some() {
+        stream.cookie_header.as_deref()
+    } else if is_youtube {
+        None
+    } else {
+        caller_cookie
+    };
+    (eff_cookie, eff_referer, eff_ua)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn inspect_direct_http_stream(
+    inspector: &core_engine::inspector::UrlInspector,
+    stream: &core_engine::video_runtime::ResolvedHttpStream,
+    is_youtube: bool,
+    caller_cookie: Option<&str>,
+    caller_referer: Option<&str>,
+    caller_ua: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+) -> Result<InspectResult, String> {
+    let (eff_cookie, eff_referer, eff_ua) = resolve_stream_request_headers(
+        stream,
+        is_youtube,
+        caller_cookie,
+        caller_referer,
+        caller_ua,
+    );
+    inspector
+        .inspect_with_options(
+            &stream.url,
+            core_engine::inspector::InspectOptions {
+                cookie: eff_cookie,
+                referer: eff_referer,
+                user_agent: eff_ua,
+                proxy_url,
+                auth_username,
+                auth_password,
+            },
+        )
+        .await
+        .map_err(|e| format!("{}", e))
+}
+
+enum HttpPhaseOutcome {
+    Completed(u64),
+    PausedInPhase,
+    CanceledInPhase,
+    Failed(String),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_http_stream_phase(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    downloader: &core_engine::downloader::Downloader,
+    stream: &core_engine::video_runtime::ResolvedHttpStream,
+    resolved_url: &str,
+    dest: &Path,
+    telemetry_target: &Path,
+    known_size: Option<u64>,
+    supports_range: bool,
+    num_connections: usize,
+    is_youtube: bool,
+    caller_cookie: Option<&str>,
+    caller_referer: Option<&str>,
+    caller_ua: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+    speed_limit_bps: Option<u64>,
+    prior_bytes: u64,
+    combined_total_bytes: u64,
+    max_pct_before_mux: f64,
+    controller: &core_engine::DownloadController,
+) -> HttpPhaseOutcome {
+    if controller.is_canceled() {
+        return HttpPhaseOutcome::CanceledInPhase;
+    }
+    if controller.is_paused() {
+        return HttpPhaseOutcome::PausedInPhase;
+    }
+
+    let (eff_cookie, eff_referer, eff_ua) = resolve_stream_request_headers(
+        stream,
+        is_youtube,
+        caller_cookie,
+        caller_referer,
+        caller_ua,
+    );
+
+    let (tx, mut rx) =
+        tokio::sync::broadcast::channel::<core_engine::model::ProgressTelemetry>(128);
+    let app_clone = app.clone();
+    let target_str = telemetry_target.display().to_string();
+    let monitor_handle = tokio::spawn(async move {
+        let mut emitted_paused = false;
+        while let Ok(telem) = rx.recv().await {
+            let segments_payload: Vec<SegmentProgressPayload> = telem
+                .segments
+                .into_iter()
+                .map(|s| SegmentProgressPayload {
+                    segment_index: s.segment_index,
+                    start_byte: s.start_byte,
+                    end_byte: s.end_byte,
+                    current_byte: s.current_byte,
+                    downloaded_bytes: s.downloaded_bytes,
+                    is_completed: s.is_completed,
+                })
+                .collect();
+
+            let composite = core_engine::video_runtime::compute_split_phase_telemetry(
+                prior_bytes,
+                telem.downloaded_bytes,
+                combined_total_bytes,
+                telem.speed_bytes_per_sec,
+                max_pct_before_mux,
+            );
+
+            match telem.status {
+                core_engine::model::TaskStatus::Canceled => {
+                    let _ = app_clone.emit(
+                        "download-telemetry",
+                        DownloadTelemetryPayload {
+                            task_id: telem.task_id.clone(),
+                            downloaded_bytes: 0,
+                            total_bytes: 0,
+                            speed_bytes_per_sec: 0,
+                            progress_percent: 0.0,
+                            eta_seconds: None,
+                            status: "canceled".to_string(),
+                            destination_path: target_str.clone(),
+                            segments: Vec::new(),
+                            error: None,
+                        },
+                    );
+                    break;
+                }
+                core_engine::model::TaskStatus::Paused => {
+                    emitted_paused = true;
+                    let _ = app_clone.emit(
+                        "download-telemetry",
+                        DownloadTelemetryPayload {
+                            task_id: telem.task_id.clone(),
+                            downloaded_bytes: composite.downloaded_bytes,
+                            total_bytes: composite.total_bytes,
+                            speed_bytes_per_sec: 0,
+                            progress_percent: composite.progress_percent,
+                            eta_seconds: None,
+                            status: "paused".to_string(),
+                            destination_path: target_str.clone(),
+                            segments: segments_payload,
+                            error: None,
+                        },
+                    );
+                    break;
+                }
+                core_engine::model::TaskStatus::Error => {
+                    // Parent handles fallback cleanly; avoid premature error state in UI.
+                    break;
+                }
+                core_engine::model::TaskStatus::Completed => {
+                    // Never emit final "completed" before muxing / audio conversion completes.
+                    let _ = app_clone.emit(
+                        "download-telemetry",
+                        DownloadTelemetryPayload {
+                            task_id: telem.task_id.clone(),
+                            downloaded_bytes: composite.downloaded_bytes,
+                            total_bytes: composite.total_bytes,
+                            speed_bytes_per_sec: 0,
+                            progress_percent: composite.progress_percent,
+                            eta_seconds: composite.eta_seconds,
+                            status: "downloading".to_string(),
+                            destination_path: target_str.clone(),
+                            segments: segments_payload,
+                            error: None,
+                        },
+                    );
+                    break;
+                }
+                _ => {
+                    let _ = app_clone.emit(
+                        "download-telemetry",
+                        DownloadTelemetryPayload {
+                            task_id: telem.task_id.clone(),
+                            downloaded_bytes: composite.downloaded_bytes,
+                            total_bytes: composite.total_bytes,
+                            speed_bytes_per_sec: telem.speed_bytes_per_sec,
+                            progress_percent: composite.progress_percent,
+                            eta_seconds: composite.eta_seconds,
+                            status: "downloading".to_string(),
+                            destination_path: target_str.clone(),
+                            segments: segments_payload,
+                            error: None,
+                        },
+                    );
+                }
+            }
+        }
+        emitted_paused
+    });
+
+    let dl_res = downloader
+        .download_with_options(
+            task_id,
+            resolved_url,
+            dest,
+            known_size,
+            supports_range,
+            num_connections,
+            Some(tx),
+            Some(controller.clone()),
+            core_engine::downloader::DownloadOptions {
+                cookie: eff_cookie,
+                referer: eff_referer,
+                user_agent: eff_ua,
+                speed_limit_bytes_per_sec: speed_limit_bps,
+                proxy_url,
+                auth_username,
+                auth_password,
+                allow_url_refresh: true,
+            },
+        )
+        .await;
+
+    let emitted_paused = monitor_handle.await.unwrap_or(false);
+
+    if controller.is_canceled() {
+        return HttpPhaseOutcome::CanceledInPhase;
+    }
+    if controller.is_paused() {
+        if !emitted_paused {
+            emit_simple_telemetry(
+                app,
+                task_id,
+                prior_bytes,
+                combined_total_bytes,
+                0,
+                if combined_total_bytes > 0 {
+                    ((prior_bytes as f64 / combined_total_bytes as f64) * max_pct_before_mux)
+                        .clamp(1.0, max_pct_before_mux)
+                } else {
+                    0.0
+                },
+                None,
+                "paused",
+                telemetry_target,
+                None,
+            );
+        }
+        return HttpPhaseOutcome::PausedInPhase;
+    }
+
+    match dl_res {
+        Ok(()) => {
+            let written = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            if written == 0 {
+                HttpPhaseOutcome::Failed("Berkas segmen HTTP kosong setelah unduhan.".to_string())
+            } else {
+                HttpPhaseOutcome::Completed(written)
+            }
+        }
+        Err(e) => HttpPhaseOutcome::Failed(format!("{}", e)),
+    }
+}
+
+enum DirectPlanOutcome {
+    Finished,
+    Stopped { paused_already_emitted: bool },
+    FallbackToYtDlp(Option<String>),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_video_json_for_download(
+    bin: &str,
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+    controller: &core_engine::DownloadController,
+) -> Option<Result<serde_json::Value, String>> {
+    let is_yt = is_youtube_url(url);
+    let has_custom_headers = cookie.is_some() || user_agent.is_some();
+
+    let primary_outcome = tokio::select! {
+        res = run_ytdlp_dump_json_with_selector(
+            bin,
+            url,
+            false,
+            None,
+            cookie,
+            referer,
+            user_agent,
+            proxy_url,
+            auth_username,
+            auth_password,
+            16,
+        ) => Some(res),
+        _ = controller.notified() => None,
+    };
+    let primary = primary_outcome?;
+
+    match primary {
+        Ok(v) if !is_yt || json_has_playable_video_format(&v) => Some(Ok(v)),
+        Err(c_err) if !is_yt && !has_custom_headers => Some(Err(c_err)),
+        fallback_candidate => {
+            let retry_outcome = tokio::select! {
+                res = run_ytdlp_dump_json_with_selector(
+                    bin,
+                    url,
+                    is_yt,
+                    None,
+                    None,
+                    referer,
+                    None,
+                    proxy_url,
+                    auth_username,
+                    auth_password,
+                    14,
+                ) => Some(res),
+                _ = controller.notified() => None,
+            };
+            let retry = retry_outcome?;
+            match (retry, fallback_candidate) {
+                (Ok(r), Ok(c)) => {
+                    if json_has_playable_video_format(&r) || !json_has_playable_video_format(&c) {
+                        Some(Ok(r))
+                    } else {
+                        Some(Ok(c))
+                    }
+                }
+                (Ok(r), Err(_)) => Some(Ok(r)),
+                (Err(_), Ok(c)) => Some(Ok(c)),
+                (Err(r_err), Err(c_err)) => Some(Err(if !r_err.is_empty() { r_err } else { c_err })),
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_direct_http_video_plan(
+    app: &tauri::AppHandle,
+    task_id: &str,
+    target: &Path,
+    target_ext: &str,
+    is_audio: bool,
+    num_connections: usize,
+    ffmpeg_path: Option<&Path>,
+    is_youtube: bool,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+    speed_limit_bps: Option<u64>,
+    resume_mode: bool,
+    http_ctrl: &core_engine::DownloadController,
+    plan: core_engine::video_runtime::VideoStreamPlan,
+) -> DirectPlanOutcome {
+    if http_ctrl.is_stopped() {
+        return DirectPlanOutcome::Stopped {
+            paused_already_emitted: false,
+        };
+    }
+
+    let downloader = match core_engine::downloader::Downloader::new() {
+        Ok(d) => d,
+        Err(e) => return DirectPlanOutcome::FallbackToYtDlp(Some(format!("{}", e))),
+    };
+    let inspector = match core_engine::inspector::UrlInspector::new() {
+        Ok(i) => i,
+        Err(e) => return DirectPlanOutcome::FallbackToYtDlp(Some(format!("{}", e))),
+    };
+
+    if !resume_mode {
+        remove_split_temp_files(target);
+    }
+
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let target_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("video");
+
+    match plan {
+        core_engine::video_runtime::VideoStreamPlan::SingleStream(stream) => {
+            let insp_res = tokio::select! {
+                res = inspect_direct_http_stream(
+                    &inspector,
+                    &stream,
+                    is_youtube,
+                    cookie,
+                    referer,
+                    user_agent,
+                    proxy_url,
+                    auth_username,
+                    auth_password,
+                ) => Some(res),
+                _ = http_ctrl.notified() => None,
+            };
+            let info = match insp_res {
+                None => {
+                    return DirectPlanOutcome::Stopped {
+                        paused_already_emitted: false,
+                    }
+                }
+                Some(Ok(r)) => r,
+                Some(Err(e)) => return DirectPlanOutcome::FallbackToYtDlp(Some(e)),
+            };
+
+            let known_size = info.file_size.or(stream.filesize);
+            let combined_total = known_size.unwrap_or(0);
+            let clean_stream_ext = if stream.ext.trim().is_empty() {
+                target_ext.to_string()
+            } else {
+                stream.ext.trim().to_ascii_lowercase()
+            };
+
+            if is_audio {
+                let atmp = parent.join(format!("{}.atmp.{}", target_name, clean_stream_ext));
+                match download_http_stream_phase(
+                    app,
+                    task_id,
+                    &downloader,
+                    &stream,
+                    &info.final_url,
+                    &atmp,
+                    target,
+                    known_size,
+                    info.supports_range,
+                    num_connections,
+                    is_youtube,
+                    cookie,
+                    referer,
+                    user_agent,
+                    proxy_url,
+                    auth_username,
+                    auth_password,
+                    speed_limit_bps,
+                    0,
+                    combined_total,
+                    94.0,
+                    http_ctrl,
+                )
+                .await
+                {
+                    HttpPhaseOutcome::CanceledInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: false,
+                        };
+                    }
+                    HttpPhaseOutcome::PausedInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: true,
+                        };
+                    }
+                    HttpPhaseOutcome::Failed(e) => {
+                        remove_split_temp_files(target);
+                        return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                    }
+                    HttpPhaseOutcome::Completed(written) => {
+                        emit_simple_telemetry(
+                            app,
+                            task_id,
+                            written,
+                            written.max(combined_total),
+                            0,
+                            95.0,
+                            Some(2),
+                            "downloading",
+                            target,
+                            None,
+                        );
+                        match convert_audio_stream_to_target(
+                            &atmp,
+                            target,
+                            target_ext,
+                            ffmpeg_path,
+                            Some(http_ctrl),
+                        )
+                        .await
+                        {
+                            Ok(true) => return DirectPlanOutcome::Finished,
+                            Ok(false) => {
+                                return DirectPlanOutcome::Stopped {
+                                    paused_already_emitted: false,
+                                }
+                            }
+                            Err(e) => {
+                                remove_split_temp_files(target);
+                                return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let same_ext =
+                    target_ext.is_empty() || clean_stream_ext.eq_ignore_ascii_case(target_ext);
+                if same_ext {
+                    match download_http_stream_phase(
+                        app,
+                        task_id,
+                        &downloader,
+                        &stream,
+                        &info.final_url,
+                        target,
+                        target,
+                        known_size,
+                        info.supports_range,
+                        num_connections,
+                        is_youtube,
+                        cookie,
+                        referer,
+                        user_agent,
+                        proxy_url,
+                        auth_username,
+                        auth_password,
+                        speed_limit_bps,
+                        0,
+                        combined_total,
+                        99.5,
+                        http_ctrl,
+                    )
+                    .await
+                    {
+                        HttpPhaseOutcome::Completed(_) => return DirectPlanOutcome::Finished,
+                        HttpPhaseOutcome::CanceledInPhase => {
+                            return DirectPlanOutcome::Stopped {
+                                paused_already_emitted: false,
+                            }
+                        }
+                        HttpPhaseOutcome::PausedInPhase => {
+                            return DirectPlanOutcome::Stopped {
+                                paused_already_emitted: true,
+                            }
+                        }
+                        HttpPhaseOutcome::Failed(e) => {
+                            let target_meta = core_engine::downloader::checkpoint_path_for(target);
+                            if target_meta.exists() {
+                                let _ = std::fs::remove_file(target);
+                                let _ = std::fs::remove_file(&target_meta);
+                            }
+                            return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                        }
+                    }
+                } else if let Some(ff_path) = ffmpeg_path {
+                    let out_ext = if target_ext.is_empty() {
+                        "mp4"
+                    } else {
+                        target_ext
+                    };
+                    let vtmp = parent.join(format!("{}.vtmp.{}", target_name, clean_stream_ext));
+                    let mux_tmp = parent.join(format!("{}.mux.{}", target_name, out_ext));
+                    let written = match download_http_stream_phase(
+                        app,
+                        task_id,
+                        &downloader,
+                        &stream,
+                        &info.final_url,
+                        &vtmp,
+                        target,
+                        known_size,
+                        info.supports_range,
+                        num_connections,
+                        is_youtube,
+                        cookie,
+                        referer,
+                        user_agent,
+                        proxy_url,
+                        auth_username,
+                        auth_password,
+                        speed_limit_bps,
+                        0,
+                        combined_total,
+                        96.0,
+                        http_ctrl,
+                    )
+                    .await
+                    {
+                        HttpPhaseOutcome::Completed(w) => w,
+                        HttpPhaseOutcome::CanceledInPhase => {
+                            return DirectPlanOutcome::Stopped {
+                                paused_already_emitted: false,
+                            }
+                        }
+                        HttpPhaseOutcome::PausedInPhase => {
+                            return DirectPlanOutcome::Stopped {
+                                paused_already_emitted: true,
+                            }
+                        }
+                        HttpPhaseOutcome::Failed(e) => {
+                            remove_split_temp_files(target);
+                            return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                        }
+                    };
+
+                    emit_simple_telemetry(
+                        app,
+                        task_id,
+                        written,
+                        written.max(combined_total),
+                        0,
+                        98.0,
+                        Some(1),
+                        "downloading",
+                        target,
+                        None,
+                    );
+
+                    let _ = std::fs::remove_file(&mux_tmp);
+                    let mut ff_cmd = tokio::process::Command::new(ff_path);
+                    hide_window_tokio(&mut ff_cmd);
+                    ff_cmd.arg("-y").arg("-i").arg(&vtmp);
+                    if out_ext == "mp4" {
+                        let acodec_l = stream.acodec.to_ascii_lowercase();
+                        if acodec_l == "none" || acodec_l.starts_with("mp4a") || acodec_l == "aac" {
+                            ff_cmd.args(["-c", "copy", "-movflags", "+faststart"]);
+                        } else {
+                            ff_cmd.args([
+                                "-c:v",
+                                "copy",
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                "192k",
+                                "-movflags",
+                                "+faststart",
+                            ]);
+                        }
+                    } else {
+                        ff_cmd.args(["-c", "copy"]);
+                    }
+                    ff_cmd
+                        .arg(&mux_tmp)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+
+                    let mux_ok = if let Ok(child) = ff_cmd.spawn() {
+                        match wait_child_with_http_ctrl(child, Some(http_ctrl)).await {
+                            Ok(None) => {
+                                let _ = std::fs::remove_file(&mux_tmp);
+                                return DirectPlanOutcome::Stopped {
+                                    paused_already_emitted: false,
+                                };
+                            }
+                            Ok(Some(st)) if st.success() => std::fs::metadata(&mux_tmp)
+                                .map(|m| m.is_file() && m.len() > 0)
+                                .unwrap_or(false),
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
+                    if mux_ok && move_file_cross_device(&mux_tmp, target).is_ok() {
+                        remove_split_temp_files(target);
+                        return DirectPlanOutcome::Finished;
+                    }
+                    remove_split_temp_files(target);
+                    return DirectPlanOutcome::FallbackToYtDlp(Some(
+                        "Gagal meremux container video ke format tujuan.".to_string(),
+                    ));
+                } else {
+                    return DirectPlanOutcome::FallbackToYtDlp(None);
+                }
+            }
+        }
+
+        core_engine::video_runtime::VideoStreamPlan::SplitVideoAudio { video, audio } => {
+            let Some(ff_path) = ffmpeg_path else {
+                return DirectPlanOutcome::FallbackToYtDlp(None);
+            };
+
+            let insp_fut = async {
+                tokio::join!(
+                    inspect_direct_http_stream(
+                        &inspector,
+                        &video,
+                        is_youtube,
+                        cookie,
+                        referer,
+                        user_agent,
+                        proxy_url,
+                        auth_username,
+                        auth_password,
+                    ),
+                    inspect_direct_http_stream(
+                        &inspector,
+                        &audio,
+                        is_youtube,
+                        cookie,
+                        referer,
+                        user_agent,
+                        proxy_url,
+                        auth_username,
+                        auth_password,
+                    ),
+                )
+            };
+            let (v_res, a_res) = tokio::select! {
+                pair = insp_fut => pair,
+                _ = http_ctrl.notified() => {
+                    return DirectPlanOutcome::Stopped {
+                        paused_already_emitted: false,
+                    }
+                }
+            };
+            let v_info = match v_res {
+                Ok(r) => r,
+                Err(e) => return DirectPlanOutcome::FallbackToYtDlp(Some(e)),
+            };
+            let a_info = match a_res {
+                Ok(r) => r,
+                Err(e) => return DirectPlanOutcome::FallbackToYtDlp(Some(e)),
+            };
+
+            let v_size = v_info.file_size.or(video.filesize);
+            let a_size = a_info.file_size.or(audio.filesize);
+            let combined_est = v_size.unwrap_or(0).saturating_add(a_size.unwrap_or(0));
+
+            let v_ext = if video.ext.trim().is_empty() {
+                "mp4"
+            } else {
+                video.ext.trim()
+            };
+            let a_ext = if audio.ext.trim().is_empty() {
+                "m4a"
+            } else {
+                audio.ext.trim()
+            };
+            let out_ext = if target_ext.is_empty() {
+                "mp4"
+            } else {
+                target_ext
+            };
+
+            let vtmp = parent.join(format!("{}.vtmp.{}", target_name, v_ext));
+            let atmp = parent.join(format!("{}.atmp.{}", target_name, a_ext));
+            let mux_tmp = parent.join(format!("{}.mux.{}", target_name, out_ext));
+
+            // Phase 1: Video track (up to 32 HTTP Range connections)
+            let v_meta = core_engine::downloader::checkpoint_path_for(&vtmp);
+            let existing_v_len = std::fs::metadata(&vtmp)
+                .ok()
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let v_already_done = resume_mode
+                && vtmp.is_file()
+                && !v_meta.exists()
+                && v_size.map_or(false, |sz| sz > 0 && existing_v_len == sz);
+
+            let v_written = if v_already_done {
+                existing_v_len
+            } else {
+                match download_http_stream_phase(
+                    app,
+                    task_id,
+                    &downloader,
+                    &video,
+                    &v_info.final_url,
+                    &vtmp,
+                    target,
+                    v_size,
+                    v_info.supports_range,
+                    num_connections,
+                    is_youtube,
+                    cookie,
+                    referer,
+                    user_agent,
+                    proxy_url,
+                    auth_username,
+                    auth_password,
+                    speed_limit_bps,
+                    0,
+                    combined_est,
+                    96.0,
+                    http_ctrl,
+                )
+                .await
+                {
+                    HttpPhaseOutcome::Completed(w) => w,
+                    HttpPhaseOutcome::CanceledInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: false,
+                        }
+                    }
+                    HttpPhaseOutcome::PausedInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: true,
+                        }
+                    }
+                    HttpPhaseOutcome::Failed(e) => {
+                        remove_split_temp_files(target);
+                        return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                    }
+                }
+            };
+
+            // Phase 2: Audio companion track (up to 32 HTTP Range connections)
+            let actual_combined = v_written.saturating_add(a_size.unwrap_or(0));
+            let a_meta = core_engine::downloader::checkpoint_path_for(&atmp);
+            let existing_a_len = std::fs::metadata(&atmp)
+                .ok()
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let a_already_done = resume_mode
+                && atmp.is_file()
+                && !a_meta.exists()
+                && a_size.map_or(false, |sz| sz > 0 && existing_a_len == sz);
+
+            let a_written = if a_already_done {
+                existing_a_len
+            } else {
+                match download_http_stream_phase(
+                    app,
+                    task_id,
+                    &downloader,
+                    &audio,
+                    &a_info.final_url,
+                    &atmp,
+                    target,
+                    a_size,
+                    a_info.supports_range,
+                    num_connections,
+                    is_youtube,
+                    cookie,
+                    referer,
+                    user_agent,
+                    proxy_url,
+                    auth_username,
+                    auth_password,
+                    speed_limit_bps,
+                    v_written,
+                    actual_combined,
+                    98.0,
+                    http_ctrl,
+                )
+                .await
+                {
+                    HttpPhaseOutcome::Completed(w) => w,
+                    HttpPhaseOutcome::CanceledInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: false,
+                        }
+                    }
+                    HttpPhaseOutcome::PausedInPhase => {
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: true,
+                        }
+                    }
+                    HttpPhaseOutcome::Failed(e) => {
+                        remove_split_temp_files(target);
+                        return DirectPlanOutcome::FallbackToYtDlp(Some(e));
+                    }
+                }
+            };
+
+            // Phase 3: FFmpeg fast stream-copy mux into destination container
+            let total_bytes = v_written.saturating_add(a_written);
+            emit_simple_telemetry(
+                app,
+                task_id,
+                total_bytes,
+                total_bytes,
+                0,
+                98.5,
+                Some(1),
+                "downloading",
+                target,
+                None,
+            );
+
+            let _ = std::fs::remove_file(&mux_tmp);
+            let mut ff_cmd = tokio::process::Command::new(ff_path);
+            hide_window_tokio(&mut ff_cmd);
+            ff_cmd
+                .arg("-y")
+                .arg("-i")
+                .arg(&vtmp)
+                .arg("-i")
+                .arg(&atmp)
+                .args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]);
+
+            let is_mp4_audio = audio.ext.eq_ignore_ascii_case("m4a")
+                || audio.acodec.to_ascii_lowercase().starts_with("mp4a")
+                || audio.acodec.eq_ignore_ascii_case("aac");
+            if out_ext == "mp4" && !is_mp4_audio {
+                ff_cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+            } else {
+                ff_cmd.args(["-c:a", "copy"]);
+            }
+            if out_ext == "mp4" {
+                ff_cmd.args(["-movflags", "+faststart"]);
+            }
+            ff_cmd
+                .arg(&mux_tmp)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+
+            let mux_ok = if let Ok(child) = ff_cmd.spawn() {
+                match wait_child_with_http_ctrl(child, Some(http_ctrl)).await {
+                    Ok(None) => {
+                        let _ = std::fs::remove_file(&mux_tmp);
+                        return DirectPlanOutcome::Stopped {
+                            paused_already_emitted: false,
+                        };
+                    }
+                    Ok(Some(st)) if st.success() => std::fs::metadata(&mux_tmp)
+                        .map(|m| m.is_file() && m.len() > 0)
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if mux_ok && move_file_cross_device(&mux_tmp, target).is_ok() {
+                remove_split_temp_files(target);
+                DirectPlanOutcome::Finished
+            } else {
+                remove_split_temp_files(target);
+                DirectPlanOutcome::FallbackToYtDlp(Some(
+                    "Muxing video + audio FFmpeg tidak berhasil.".to_string(),
+                ))
+            }
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_real_download(
     app: tauri::AppHandle,
@@ -1816,8 +3284,49 @@ async fn start_real_download(
     auth_password: Option<String>,
     allow_url_refresh: Option<bool>,
 ) -> Result<(), String> {
+    start_real_download_with_controller(
+        app,
+        task_id,
+        url,
+        destination_path,
+        num_connections,
+        format_id,
+        cookie,
+        referer,
+        user_agent,
+        speed_limit_kbs,
+        resume,
+        proxy_url,
+        auth_username,
+        auth_password,
+        allow_url_refresh,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_real_download_with_controller(
+    app: tauri::AppHandle,
+    task_id: String,
+    url: String,
+    destination_path: String,
+    num_connections: usize,
+    format_id: Option<String>,
+    cookie: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    speed_limit_kbs: Option<u64>,
+    resume: Option<bool>,
+    proxy_url: Option<String>,
+    auth_username: Option<String>,
+    auth_password: Option<String>,
+    allow_url_refresh: Option<bool>,
+    pre_controller: Option<core_engine::DownloadController>,
+) -> Result<(), String> {
+    let resume_mode = resume.unwrap_or(false);
     let raw_target = resolve_path(&destination_path);
-    let target = if resume.unwrap_or(false) {
+    let target = if resume_mode {
         raw_target
     } else {
         resolve_unique_destination(&raw_target)
@@ -1826,17 +3335,307 @@ async fn start_real_download(
         let _ = std::fs::create_dir_all(parent);
     }
 
+    let effective_connections = num_connections.clamp(1, 32);
+
     tauri::async_runtime::spawn(async move {
         register_task_target(&task_id, &target);
+
+        let http_ctrl = match pre_controller {
+            Some(c) => c,
+            None => {
+                let c = core_engine::DownloadController::new();
+                register_active_download(&task_id, ActiveControl::Http(c.clone()));
+                c
+            }
+        };
+
+        if http_ctrl.is_canceled() {
+            unregister_active_download(&task_id);
+            remove_task_target(&task_id);
+            cleanup_download_artifacts(&target);
+            emit_simple_telemetry(
+                &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+            );
+            return;
+        }
+        if http_ctrl.is_paused() {
+            unregister_active_download(&task_id);
+            emit_simple_telemetry(
+                &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+            );
+            return;
+        }
 
         let is_video_or_stream = is_video_or_stream_url(&url)
             || format_id.as_deref().map_or(false, |f| !f.trim().is_empty());
 
         if is_video_or_stream {
-            let ytdlp_res = ensure_ytdlp_ready_for_video().await;
+            // Emit initial progress immediately
+            emit_simple_telemetry(
+                &app,
+                &task_id,
+                0,
+                0,
+                0,
+                2.0,
+                None,
+                "downloading",
+                &target,
+                None,
+            );
+
+            let ytdlp_res = tokio::select! {
+                res = ensure_ytdlp_ready_for_video() => Some(res),
+                _ = http_ctrl.notified() => None,
+            };
+
+            let Some(ytdlp_res) = ytdlp_res else {
+                unregister_active_download(&task_id);
+                if http_ctrl.is_canceled() {
+                    remove_task_target(&task_id);
+                    cleanup_download_artifacts(&target);
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                    );
+                } else {
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+                    );
+                }
+                return;
+            };
+
             let mut ytdlp_error_detail: Option<String> = ytdlp_res.as_ref().err().cloned();
 
             if let Ok(bin) = ytdlp_res {
+                let target_ext = target
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .unwrap_or_default();
+                let is_audio = matches!(target_ext.as_str(), "mp3" | "m4a" | "flac" | "wav")
+                    || matches!(format_id.as_deref(), Some("audio_mp3") | Some("audio_m4a"));
+
+                // Locate ffmpeg before selecting streams so progressive fallback works if ffmpeg is absent
+                let ffmpeg_path = find_executable_in_dirs(&["ffmpeg"], &default_tool_dirs());
+                let has_ffmpeg = ffmpeg_path.is_some();
+
+                // Fast path: resolve direct HTTP(S) streams (progressive or split DASH video+audio)
+                // and run through multi-connection core_engine::Downloader with up to 32 threads!
+                if !is_direct_manifest_url(&url) {
+                    let raw_key = raw_video_cache_key(
+                        &url,
+                        cookie.as_deref(),
+                        referer.as_deref(),
+                        user_agent.as_deref(),
+                        proxy_url.as_deref(),
+                        auth_username.as_deref(),
+                        auth_password.as_deref(),
+                    );
+                    let cached_json = get_cached_raw_ytdlp_json(&raw_key);
+                    let mut fetched_from_cache = cached_json.is_some();
+
+                    let mut current_json = match cached_json {
+                        Some(v) => Some(v),
+                        None => {
+                            match fetch_video_json_for_download(
+                                &bin,
+                                &url,
+                                cookie.as_deref(),
+                                referer.as_deref(),
+                                user_agent.as_deref(),
+                                proxy_url.as_deref(),
+                                auth_username.as_deref(),
+                                auth_password.as_deref(),
+                                &http_ctrl,
+                            )
+                            .await
+                            {
+                                None => {
+                                    unregister_active_download(&task_id);
+                                    if http_ctrl.is_canceled() {
+                                        remove_task_target(&task_id);
+                                        cleanup_download_artifacts(&target);
+                                        emit_simple_telemetry(
+                                            &app, &task_id, 0, 0, 0, 0.0, None, "canceled",
+                                            &target, None,
+                                        );
+                                    } else {
+                                        emit_simple_telemetry(
+                                            &app, &task_id, 0, 0, 0, 0.0, None, "paused",
+                                            &target, None,
+                                        );
+                                    }
+                                    return;
+                                }
+                                Some(Ok(v)) => {
+                                    put_cached_raw_ytdlp_json(&raw_key, &v);
+                                    Some(v)
+                                }
+                                Some(Err(e)) => {
+                                    ytdlp_error_detail = Some(e);
+                                    None
+                                }
+                            }
+                        }
+                    };
+
+                    for attempt in 0..2 {
+                        let Some(ref json_val) = current_json else {
+                            break;
+                        };
+                        let Some(plan) = core_engine::video_runtime::extract_direct_stream_plan(
+                            json_val,
+                            format_id.as_deref(),
+                            &target_ext,
+                            is_audio,
+                            has_ffmpeg,
+                        ) else {
+                            break;
+                        };
+
+                        let speed_limit_bps = http_ctrl
+                            .speed_limit()
+                            .or_else(|| speed_limit_kbs.filter(|&k| k > 0).map(|k| k * 1024));
+
+                        match execute_direct_http_video_plan(
+                            &app,
+                            &task_id,
+                            &target,
+                            &target_ext,
+                            is_audio,
+                            effective_connections,
+                            ffmpeg_path.as_deref(),
+                            is_youtube_url(&url),
+                            cookie.as_deref(),
+                            referer.as_deref(),
+                            user_agent.as_deref(),
+                            proxy_url.as_deref(),
+                            auth_username.as_deref(),
+                            auth_password.as_deref(),
+                            speed_limit_bps,
+                            resume_mode,
+                            &http_ctrl,
+                            plan,
+                        )
+                        .await
+                        {
+                            DirectPlanOutcome::Finished => {
+                                unregister_active_download(&task_id);
+                                let file_len = std::fs::metadata(&target)
+                                    .ok()
+                                    .filter(|m| m.is_file())
+                                    .map(|m| m.len())
+                                    .unwrap_or(0);
+                                remove_task_target(&task_id);
+                                if file_len == 0 {
+                                    emit_simple_telemetry(
+                                        &app,
+                                        &task_id,
+                                        0,
+                                        0,
+                                        0,
+                                        0.0,
+                                        None,
+                                        "error",
+                                        &target,
+                                        Some(
+                                            "Berkas hasil unduhan video/audio kosong atau tidak tersimpan ke disk."
+                                                .to_string(),
+                                        ),
+                                    );
+                                } else {
+                                    emit_simple_telemetry(
+                                        &app,
+                                        &task_id,
+                                        file_len,
+                                        file_len,
+                                        0,
+                                        100.0,
+                                        Some(0),
+                                        "completed",
+                                        &target,
+                                        None,
+                                    );
+                                }
+                                return;
+                            }
+                            DirectPlanOutcome::Stopped {
+                                paused_already_emitted,
+                            } => {
+                                unregister_active_download(&task_id);
+                                if http_ctrl.is_canceled() {
+                                    remove_task_target(&task_id);
+                                    cleanup_download_artifacts(&target);
+                                    emit_simple_telemetry(
+                                        &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target,
+                                        None,
+                                    );
+                                } else if !paused_already_emitted {
+                                    emit_simple_telemetry(
+                                        &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target,
+                                        None,
+                                    );
+                                }
+                                return;
+                            }
+                            DirectPlanOutcome::FallbackToYtDlp(err_msg) => {
+                                invalidate_cached_raw_ytdlp_json(&raw_key);
+                                if let Some(msg) = err_msg {
+                                    log::warn!(
+                                        "Direct HTTP stream fallback for {} (attempt {}): {}",
+                                        url,
+                                        attempt + 1,
+                                        msg
+                                    );
+                                }
+                                // If initial URL came from short-lived cache, refresh JSON once cleanly.
+                                if fetched_from_cache && attempt == 0 {
+                                    fetched_from_cache = false;
+                                    match fetch_video_json_for_download(
+                                        &bin,
+                                        &url,
+                                        cookie.as_deref(),
+                                        referer.as_deref(),
+                                        user_agent.as_deref(),
+                                        proxy_url.as_deref(),
+                                        auth_username.as_deref(),
+                                        auth_password.as_deref(),
+                                        &http_ctrl,
+                                    )
+                                    .await
+                                    {
+                                        None => {
+                                            unregister_active_download(&task_id);
+                                            if http_ctrl.is_canceled() {
+                                                remove_task_target(&task_id);
+                                                cleanup_download_artifacts(&target);
+                                                emit_simple_telemetry(
+                                                    &app, &task_id, 0, 0, 0, 0.0, None,
+                                                    "canceled", &target, None,
+                                                );
+                                            } else {
+                                                emit_simple_telemetry(
+                                                    &app, &task_id, 0, 0, 0, 0.0, None, "paused",
+                                                    &target, None,
+                                                );
+                                            }
+                                            return;
+                                        }
+                                        Some(Ok(fresh)) => {
+                                            put_cached_raw_ytdlp_json(&raw_key, &fresh);
+                                            current_json = Some(fresh);
+                                            continue;
+                                        }
+                                        Some(Err(_)) => break,
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback path (HLS/DASH manifests or non-Range video CDNs): delegate to yt-dlp -N <conns>
                 let paused_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let canceled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stop_notify = Arc::new(Notify::new());
@@ -1850,29 +3649,23 @@ async fn start_real_download(
                     },
                 );
 
-                // Emit initial start progress immediately
-                emit_simple_telemetry(
-                    &app,
-                    &task_id,
-                    0,
-                    0,
-                    0,
-                    2.0,
-                    None,
-                    "downloading",
-                    &target,
-                    None,
-                );
-
-                let target_ext = target
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                    .unwrap_or_default();
-                let is_audio = matches!(target_ext.as_str(), "mp3" | "m4a" | "flac" | "wav");
-
-                // Locate ffmpeg before selecting streams so progressive fallback works if ffmpeg is absent
-                let ffmpeg_path = find_executable_in_dirs(&["ffmpeg"], &default_tool_dirs());
-                let has_ffmpeg = ffmpeg_path.is_some();
+                // Honor any pause/cancel that raced right before switching control type
+                if http_ctrl.is_canceled() {
+                    unregister_active_download(&task_id);
+                    remove_task_target(&task_id);
+                    cleanup_download_artifacts(&target);
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                    );
+                    return;
+                }
+                if http_ctrl.is_paused() {
+                    unregister_active_download(&task_id);
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+                    );
+                    return;
+                }
 
                 let tmp_video = if is_audio {
                     if target_ext == "m4a" && !has_ffmpeg {
@@ -1893,10 +3686,14 @@ async fn start_real_download(
                 }
                 cmd.arg("--no-playlist");
                 cmd.arg("--newline");
-                if num_connections > 1 {
-                    cmd.arg("-N").arg(num_connections.clamp(1, 32).to_string());
+                if effective_connections > 1 {
+                    cmd.arg("-N").arg(effective_connections.to_string());
                 }
-                if let Some(kbs) = speed_limit_kbs.filter(|&k| k > 0) {
+                let eff_kbs = http_ctrl
+                    .speed_limit()
+                    .map(|bps| if bps == 0 { 0 } else { (bps / 1024).max(1) })
+                    .or(speed_limit_kbs);
+                if let Some(kbs) = eff_kbs.filter(|&k| k > 0) {
                     cmd.arg("--limit-rate").arg(format!("{}K", kbs));
                 }
                 apply_ytdlp_headers(
@@ -1918,59 +3715,12 @@ async fn start_real_download(
                     }
                 }
 
-                let parse_height_selector = |h: u32| -> String {
-                    if has_ffmpeg {
-                        format!("bestvideo[height<={h}]+bestaudio/best[height<={h}]/best")
-                    } else {
-                        format!("best[height<={h}][ext=mp4]/best[height<={h}]/best")
-                    }
-                };
-                let default_video_selector = if has_ffmpeg {
-                    "bestvideo+bestaudio/best".to_string()
-                } else {
-                    "best[ext=mp4]/best".to_string()
-                };
-                let default_m4a_selector = if has_ffmpeg {
-                    "bestaudio[ext=m4a]/bestaudio/18/best".to_string()
-                } else {
-                    "bestaudio[ext=m4a]/best[ext=m4a]/bestaudio/18/best".to_string()
-                };
-
-                let fmt_selector = if let Some(fid) = format_id.as_deref() {
-                    if fid == "audio_mp3" {
-                        "bestaudio/18/best".to_string()
-                    } else if fid == "audio_m4a" {
-                        default_m4a_selector.clone()
-                    } else if let Some(h_str) = fid.strip_suffix("p_mp4") {
-                        if let Ok(h) = h_str.parse::<u32>() {
-                            parse_height_selector(h)
-                        } else {
-                            default_video_selector.clone()
-                        }
-                    } else if let Some(h_str) = fid.strip_suffix('p') {
-                        if let Ok(h) = h_str.parse::<u32>() {
-                            parse_height_selector(h)
-                        } else {
-                            default_video_selector.clone()
-                        }
-                    } else if is_audio {
-                        if target_ext == "m4a" {
-                            default_m4a_selector.clone()
-                        } else {
-                            "bestaudio/18/best".to_string()
-                        }
-                    } else {
-                        default_video_selector.clone()
-                    }
-                } else if is_audio {
-                    if target_ext == "m4a" {
-                        default_m4a_selector
-                    } else {
-                        "bestaudio/18/best".to_string()
-                    }
-                } else {
-                    default_video_selector
-                };
+                let fmt_selector = build_ytdlp_format_selector(
+                    format_id.as_deref(),
+                    &target_ext,
+                    is_audio,
+                    has_ffmpeg,
+                );
 
                 cmd.arg("-f").arg(&fmt_selector);
                 if !is_audio && has_ffmpeg {
@@ -2068,7 +3818,6 @@ async fn start_real_download(
                         if let Some(Ok(s)) = status {
                             if s.success() {
                                 if is_audio {
-                                    // Telemetry for audio conversion phase
                                     emit_simple_telemetry(
                                         &app,
                                         &task_id,
@@ -2082,136 +3831,15 @@ async fn start_real_download(
                                         None,
                                     );
 
-                                    let mut converted = false;
-                                    if let Some(home) = user_home_dir() {
-                                        let converter_script =
-                                            home.join(".download-cepat").join("bin").join("converter.py");
-                                        let venv_dir = home.join(".download-cepat").join("venv");
-                                        let python_candidates = [
-                                            venv_dir.join("bin").join("python3"),
-                                            venv_dir.join("Scripts").join("python.exe"),
-                                        ];
-                                        let python_bin = python_candidates
-                                            .into_iter()
-                                            .find(|p| p.is_file())
-                                            .or_else(|| {
-                                                find_executable_in_dirs(
-                                                    &["python3", "python"],
-                                                    &default_tool_dirs(),
-                                                )
-                                            });
-
-                                        if converter_script.is_file() {
-                                            if let Some(py) = python_bin {
-                                                let mut conv_cmd = tokio::process::Command::new(&py);
-                                                hide_window_tokio(&mut conv_cmd);
-                                                conv_cmd
-                                                    .arg(&converter_script)
-                                                    .arg(&tmp_video)
-                                                    .arg(&target)
-                                                    .stdout(std::process::Stdio::null())
-                                                    .stderr(std::process::Stdio::null());
-                                                if let Ok(c_status) = conv_cmd.status().await {
-                                                    if c_status.success() {
-                                                        converted = std::fs::metadata(&target)
-                                                            .map(|m| m.is_file() && m.len() > 0)
-                                                            .unwrap_or(false);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if !converted {
-                                        if let Some(ref ff_path) = ffmpeg_path {
-                                            let mut ff_cmd = tokio::process::Command::new(ff_path);
-                                            hide_window_tokio(&mut ff_cmd);
-                                            ff_cmd.arg("-y").arg("-i").arg(&tmp_video).arg("-vn");
-                                            match target_ext.as_str() {
-                                                "mp3" => {
-                                                    ff_cmd.args(["-c:a", "libmp3lame", "-b:a", "256k"]);
-                                                }
-                                                "m4a" => {
-                                                    ff_cmd.args([
-                                                        "-c:a",
-                                                        "aac",
-                                                        "-b:a",
-                                                        "256k",
-                                                        "-movflags",
-                                                        "+faststart",
-                                                    ]);
-                                                }
-                                                "flac" => {
-                                                    ff_cmd.args(["-c:a", "flac"]);
-                                                }
-                                                "wav" => {
-                                                    ff_cmd.args(["-c:a", "pcm_s16le"]);
-                                                }
-                                                _ => {}
-                                            }
-                                            ff_cmd
-                                                .arg(&target)
-                                                .stdout(std::process::Stdio::null())
-                                                .stderr(std::process::Stdio::null());
-                                            if let Ok(ff_status) = ff_cmd.status().await {
-                                                if ff_status.success() {
-                                                    converted = std::fs::metadata(&target)
-                                                        .map(|m| m.is_file() && m.len() > 0)
-                                                        .unwrap_or(false);
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if !converted {
-                                        #[cfg(target_os = "macos")]
-                                        {
-                                            let mut m4a_path = target.clone();
-                                            m4a_path.set_extension("m4a");
-                                            let _ = tokio::process::Command::new("afconvert")
-                                                .arg("-f")
-                                                .arg("m4af")
-                                                .arg("-d")
-                                                .arg("aac")
-                                                .arg(&tmp_video)
-                                                .arg(&m4a_path)
-                                                .stdout(std::process::Stdio::null())
-                                                .stderr(std::process::Stdio::null())
-                                                .status()
-                                                .await;
-
-                                            if target != m4a_path && !target.exists() && m4a_path.exists() {
-                                                let _ = std::fs::copy(&m4a_path, &target);
-                                            }
-                                            if std::fs::metadata(&target)
-                                                .map(|m| m.is_file() && m.len() > 0)
-                                                .unwrap_or(false)
-                                            {
-                                                converted = true;
-                                            }
-                                        }
-                                    }
-
-                                    if !converted && target_ext == "m4a" && tmp_video.is_file() {
-                                        let is_isobmff = std::fs::File::open(&tmp_video)
-                                            .and_then(|mut f| {
-                                                use std::io::Read;
-                                                let mut hdr = [0u8; 12];
-                                                f.read_exact(&mut hdr).map(|_| &hdr[4..8] == b"ftyp")
-                                            })
-                                            .unwrap_or(false);
-                                        if is_isobmff
-                                            && move_file_cross_device(&tmp_video, &target).is_ok()
-                                        {
-                                            converted = std::fs::metadata(&target)
-                                                .map(|m| m.is_file() && m.len() > 0)
-                                                .unwrap_or(false);
-                                        }
-                                    }
-
-                                    let _ = std::fs::remove_file(&tmp_video);
-
-                                    if !converted {
+                                    if let Err(err_msg) = convert_audio_stream_to_target(
+                                        &tmp_video,
+                                        &target,
+                                        &target_ext,
+                                        ffmpeg_path.as_deref(),
+                                        None,
+                                    )
+                                    .await
+                                    {
                                         remove_task_target(&task_id);
                                         emit_simple_telemetry(
                                             &app,
@@ -2223,10 +3851,7 @@ async fn start_real_download(
                                             None,
                                             "error",
                                             &target,
-                                            Some(format!(
-                                                "Gagal mengonversi audio ke .{}. Pasang FFmpeg di sistem agar konversi audio (MP3/M4A) dapat berjalan.",
-                                                target_ext
-                                            )),
+                                            Some(err_msg),
                                         );
                                         return;
                                     }
@@ -2300,9 +3925,8 @@ async fn start_real_download(
             return;
         }
 
-        // Standard HTTP / HTTPS multi-connection download
-        let controller = core_engine::DownloadController::new();
-        register_active_download(&task_id, ActiveControl::Http(controller.clone()));
+        // Standard HTTP / HTTPS multi-connection download (reuse http_ctrl so pre-reserved slots work seamlessly)
+        let controller = http_ctrl;
 
         let downloader = match core_engine::downloader::Downloader::new() {
             Ok(d) => d,
@@ -2463,7 +4087,9 @@ async fn start_real_download(
             }
         });
 
-        let speed_limit_bps = speed_limit_kbs.filter(|&k| k > 0).map(|k| k * 1024);
+        let speed_limit_bps = controller
+            .speed_limit()
+            .or_else(|| speed_limit_kbs.filter(|&k| k > 0).map(|k| k * 1024));
         let download_result = downloader
             .download_with_options(
                 &task_id,
@@ -2471,7 +4097,7 @@ async fn start_real_download(
                 &target,
                 file_size,
                 supports_range,
-                num_connections,
+                effective_connections,
                 Some(tx),
                 Some(controller.clone()),
                 core_engine::downloader::DownloadOptions {
@@ -4651,11 +6277,15 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
 
                         let mut inspect_err_msg = "Stream video tidak dapat dianalisis.".to_string();
                         if !target_url.is_empty() {
-                            match inspect_video_url_with_headers(
+                            let rt = get_runtime_settings();
+                            match inspect_video_url_with_options(
                                 &target_url,
                                 inspect_cookie.as_deref(),
                                 inspect_referer.as_deref(),
                                 inspect_ua.as_deref(),
+                                rt.proxy_url.as_deref(),
+                                None,
+                                None,
                             )
                             .await
                             {
@@ -4732,22 +6362,48 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                 let is_audio = v["isAudioOnly"].as_bool().unwrap_or(false)
                                     || clean_ext == "mp3"
                                     || clean_ext == "m4a";
-                                let conn_count = v["connections"].as_u64().or_else(|| v["numConnections"].as_u64()).unwrap_or(8) as usize;
+                                let rt = get_runtime_settings();
+                                let conn_count = v["connections"]
+                                    .as_u64()
+                                    .or_else(|| v["numConnections"].as_u64())
+                                    .map(|n| n as usize)
+                                    .unwrap_or(rt.default_connections)
+                                    .clamp(1, 32);
                                 let cookie_opt = v["cookie"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
                                 let referer_opt = v["referer"].as_str().or_else(|| v["referrer"].as_str()).filter(|s| !s.trim().is_empty()).map(String::from);
                                 let ua_opt = v["userAgent"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
 
                                 let clean_title = sanitize_media_title(&raw_title, "Video");
 
+                                static EXT_TASK_SEQ: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
                                 let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                                let task_id = format!("task-{}", now_ms);
+                                let seq = EXT_TASK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let task_id = format!("task-{}-{}", now_ms, seq);
                                 let file_name = format!("{}.{}", clean_title, clean_ext);
                                 let cat_id = if is_audio { "music" } else { "video" };
-                                let dest_path = if is_audio {
-                                    format!("~/Downloads/Music/{}", file_name)
+                                let dest_dir = if is_audio {
+                                    &rt.music_save_dir
                                 } else {
-                                    format!("~/Downloads/Video/{}", file_name)
+                                    &rt.video_save_dir
                                 };
+                                let dest_path = join_save_dir_and_file(dest_dir, &file_name);
+
+                                let pre_ctrl = core_engine::DownloadController::new();
+                                if rt.speed_limit_kbs > 0 {
+                                    pre_ctrl.set_speed_limit(rt.speed_limit_kbs * 1024);
+                                }
+                                let is_queued = if let Ok(mut map) = active_downloads().lock() {
+                                    if map.len() >= rt.max_tasks {
+                                        true
+                                    } else {
+                                        map.insert(task_id.clone(), ActiveControl::Http(pre_ctrl.clone()));
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+                                let speed_limit_bps = rt.speed_limit_kbs * 1024;
 
                                 // Emit to frontend so the task is displayed in the active list
                                 let _ = app_handle.emit("external-task-added", serde_json::json!({
@@ -4759,42 +6415,55 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                     "formatId": format_id.clone(),
                                     "resolution": resolution.clone(),
                                     "numConnections": conn_count,
-                                    "status": "downloading"
+                                    "status": if is_queued { "queued" } else { "downloading" },
+                                    "cookie": cookie_opt.clone(),
+                                    "referer": referer_opt.clone(),
+                                    "userAgent": ua_opt.clone(),
+                                    "proxyUrl": rt.proxy_url.clone(),
+                                    "speedLimitBytesPerSec": speed_limit_bps,
                                 }));
 
-                                // Spawn real background download!
-                                let app_for_dl = app_handle.clone();
-                                let tid_for_dl = task_id.clone();
-                                let u_for_dl = url.clone();
-                                let dest_for_dl = dest_path.clone();
-                                let fmt_for_dl = Some(format_id.clone());
-                                tauri::async_runtime::spawn(async move {
-                                    let _ = start_real_download(
-                                        app_for_dl,
-                                        tid_for_dl,
-                                        u_for_dl,
-                                        dest_for_dl,
-                                        conn_count,
-                                        fmt_for_dl,
-                                        cookie_opt,
-                                        referer_opt,
-                                        ua_opt,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                        None,
-                                    )
-                                    .await;
-                                });
+                                // Spawn real background download immediately when an active slot was reserved
+                                if !is_queued {
+                                    let app_for_dl = app_handle.clone();
+                                    let tid_for_dl = task_id.clone();
+                                    let u_for_dl = url.clone();
+                                    let dest_for_dl = dest_path.clone();
+                                    let fmt_for_dl = Some(format_id.clone());
+                                    let speed_kbs_opt = (rt.speed_limit_kbs > 0).then_some(rt.speed_limit_kbs);
+                                    let proxy_for_dl = rt.proxy_url.clone();
+                                    let ctrl_for_dl = pre_ctrl;
+                                    tauri::async_runtime::spawn(async move {
+                                        let _ = start_real_download_with_controller(
+                                            app_for_dl,
+                                            tid_for_dl,
+                                            u_for_dl,
+                                            dest_for_dl,
+                                            conn_count,
+                                            fmt_for_dl,
+                                            cookie_opt,
+                                            referer_opt,
+                                            ua_opt,
+                                            speed_kbs_opt,
+                                            None,
+                                            proxy_for_dl,
+                                            None,
+                                            None,
+                                            Some(true),
+                                            Some(ctrl_for_dl),
+                                        )
+                                        .await;
+                                    });
+                                }
 
                                 let resp_body = serde_json::json!({
                                     "status": "ok",
                                     "message": "Unduhan berhasil dimulai di latar belakang",
                                     "taskId": task_id,
                                     "fileName": file_name,
-                                    "destinationPath": dest_path
+                                    "destinationPath": dest_path,
+                                    "numConnections": conn_count,
+                                    "queued": is_queued
                                 }).to_string();
 
                                 let resp = format!(
@@ -4942,6 +6611,7 @@ pub fn run() {
             open_external_url,
             get_build_info,
             set_tray_language,
+            sync_runtime_settings,
             check_for_app_update,
             download_and_install_app_update
         ])
@@ -5194,6 +6864,11 @@ mod tests {
             "Song.temp_stream.m4a.part",
             "Song.f140.m4a",
             "Song.f251.webm.part",
+            "Song.mp3.vtmp.mp4",
+            "Song.mp3.vtmp.mp4.dcmeta",
+            "Song.mp3.atmp.m4a",
+            "Song.mp3.atmp.m4a.dcmeta",
+            "Song.mp3.mux.mp4",
         ];
         for name in &junk_files {
             std::fs::write(test_dir.join(name), b"partial").expect("write junk file");
@@ -5418,7 +7093,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.2");
+        assert_eq!(info.version, "1.0.3");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
@@ -5446,21 +7121,21 @@ mod tests {
         );
 
         let nsis_cmd = build_windows_update_cmd(
-            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64-setup.exe"),
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.3_x64-setup.exe"),
             Path::new(r"C:\Users\Alice\AppData\Local\Download Cepat\Download Cepat.exe"),
             false,
         )
         .expect("valid NSIS script");
-        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64-setup.exe\" /S"));
+        assert!(nsis_cmd.contains("start /wait \"\" \"C:\\Temp\\dc\\Download.Cepat_1.0.3_x64-setup.exe\" /S"));
         assert!(nsis_cmd.contains("start \"\" \"C:\\Users\\Alice\\AppData\\Local\\Download Cepat\\Download Cepat.exe\""));
 
         let msi_cmd = build_windows_update_cmd(
-            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.2_x64.msi"),
+            Path::new(r"C:\Temp\dc\Download.Cepat_1.0.3_x64.msi"),
             Path::new(r"C:\Program Files\Download Cepat\Download Cepat.exe"),
             true,
         )
         .expect("valid MSI script");
-        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.2_x64.msi\" /passive /norestart"));
+        assert!(msi_cmd.contains("msiexec /i \"C:\\Temp\\dc\\Download.Cepat_1.0.3_x64.msi\" /passive /norestart"));
 
         // Injection / unsafe batch chars must be rejected
         assert!(build_windows_update_cmd(
@@ -5468,5 +7143,108 @@ mod tests {
             Path::new(r"C:\App\dc.exe"),
             false
         ).is_err());
+    }
+
+    #[test]
+    fn test_runtime_settings_and_join_save_dir() {
+        let def = RuntimeDownloadSettings::default();
+        assert_eq!(def.default_connections, 8);
+        assert_eq!(def.max_tasks, 2);
+        assert_eq!(def.speed_limit_kbs, 0);
+        assert!(def.proxy_url.is_none());
+        assert_eq!(def.video_save_dir, "~/Downloads/Video");
+        assert_eq!(def.music_save_dir, "~/Downloads/Music");
+
+        let clamped = normalize_runtime_settings(RuntimeDownloadSettings {
+            default_connections: 99,
+            max_tasks: 0,
+            speed_limit_kbs: 4096,
+            proxy_url: Some("  socks5://127.0.0.1:1080  ".to_string()),
+            video_save_dir: "   ".to_string(),
+            music_save_dir: r"D:\Musik\".to_string(),
+        });
+        assert_eq!(clamped.default_connections, 32);
+        assert_eq!(clamped.max_tasks, 1);
+        assert_eq!(clamped.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
+        assert_eq!(clamped.video_save_dir, "~/Downloads/Video");
+        assert_eq!(clamped.music_save_dir, r"D:\Musik\");
+
+        let test_dir = std::env::temp_dir().join(format!("dc_rt_settings_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&test_dir);
+        let file = test_dir.join("runtime_settings.json");
+        let saved_cfg = normalize_runtime_settings(RuntimeDownloadSettings {
+            default_connections: 32,
+            max_tasks: 5,
+            speed_limit_kbs: 0,
+            proxy_url: None,
+            video_save_dir: r"E:\Videos\".to_string(),
+            music_save_dir: "~/Downloads/Music".to_string(),
+        });
+        save_runtime_settings_to_path(&file, &saved_cfg).expect("save runtime settings");
+        let reloaded = load_runtime_settings_from_path(&file);
+        assert_eq!(reloaded, saved_cfg);
+        let _ = std::fs::remove_dir_all(&test_dir);
+
+        assert_eq!(
+            join_save_dir_and_file("~/Downloads/Video/", "clip.mp4"),
+            "~/Downloads/Video/clip.mp4"
+        );
+        assert_eq!(
+            join_save_dir_and_file(r"D:\Video\", "clip.mp4"),
+            r"D:\Video\clip.mp4"
+        );
+        assert_eq!(join_save_dir_and_file("C:", "clip.mp4"), r"C:\clip.mp4");
+        assert_eq!(join_save_dir_and_file("/", "clip.mp4"), "/clip.mp4");
+    }
+
+    #[test]
+    fn test_build_ytdlp_format_selector_and_stream_headers() {
+        assert_eq!(
+            build_ytdlp_format_selector(Some("1080p_mp4"), "mp4", false, true),
+            "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+        );
+        assert_eq!(
+            build_ytdlp_format_selector(Some("720p_mp4"), "mp4", false, false),
+            "best[height<=720][ext=mp4]/best[height<=720]/best"
+        );
+        assert_eq!(
+            build_ytdlp_format_selector(Some("audio_mp3"), "mp3", true, true),
+            "bestaudio/18/best"
+        );
+        assert_eq!(
+            build_ytdlp_format_selector(Some("audio_m4a"), "m4a", true, true),
+            "bestaudio[ext=m4a]/bestaudio/18/best"
+        );
+
+        let stream = core_engine::video_runtime::ResolvedHttpStream {
+            url: "https://rr1.googlevideo.com/videoplayback".to_string(),
+            ext: "mp4".to_string(),
+            height: Some(1080),
+            filesize: Some(1024),
+            vcodec: "avc1".to_string(),
+            acodec: "none".to_string(),
+            user_agent: Some("StreamUA/1.0".to_string()),
+            referer: None,
+            cookie_header: None,
+        };
+        let (yt_cookie, yt_ref, yt_ua) = resolve_stream_request_headers(
+            &stream,
+            true,
+            Some("SESSION=abc"),
+            Some("https://www.youtube.com/watch?v=123"),
+            Some("CallerUA/1.0"),
+        );
+        assert_eq!(yt_cookie, None);
+        assert_eq!(yt_ref, Some("https://www.youtube.com/watch?v=123"));
+        assert_eq!(yt_ua, Some("StreamUA/1.0"));
+
+        let (gen_cookie, _, _) = resolve_stream_request_headers(
+            &stream,
+            false,
+            Some("SESSION=abc"),
+            None,
+            None,
+        );
+        assert_eq!(gen_cookie, Some("SESSION=abc"));
     }
 }

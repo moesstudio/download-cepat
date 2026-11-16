@@ -167,6 +167,28 @@ impl BandwidthLimiter {
     }
 }
 
+pub fn build_connection_stepdown_plan(
+    initial_conns: usize,
+    supports_range: bool,
+) -> Vec<(usize, bool)> {
+    if !supports_range {
+        return vec![(1, false)];
+    }
+
+    let clamped = initial_conns.clamp(1, 32);
+    let mut plan: Vec<(usize, bool)> = vec![(clamped, true)];
+    if clamped > 16 {
+        plan.push((16, true));
+    }
+    if clamped > 4 {
+        plan.push((4, true));
+    }
+    if clamped > 1 {
+        plan.push((1, false));
+    }
+    plan
+}
+
 pub struct Downloader {
     client: reqwest::Client,
     fallback_client: reqwest::Client,
@@ -265,21 +287,7 @@ impl Downloader {
             )
             .await;
         }
-        let initial_conns = if !supports_range || file_size.is_none() || file_size == Some(0) {
-            1
-        } else {
-            num_connections.clamp(1, 32)
-        };
-
-        // Connection step-down plan when rate-limited / server drops parallel sockets:
-        // e.g. 32 -> 4 -> 1 (single stream without Range)
-        let mut plan: Vec<(usize, bool)> = vec![(initial_conns, supports_range)];
-        if supports_range && initial_conns > 4 {
-            plan.push((4, true));
-        }
-        if supports_range && initial_conns > 1 {
-            plan.push((1, false));
-        }
+        let plan = build_connection_stepdown_plan(num_connections, supports_range && file_size.is_some() && file_size != Some(0));
 
         let mut last_err: Option<anyhow::Error> = None;
 

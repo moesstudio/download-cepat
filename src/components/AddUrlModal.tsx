@@ -87,6 +87,12 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
     checkDiskSpace(saveDir).then(setFreeDiskBytes);
   }, [isOpen, saveDir]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      setNumConnections(defaultConnections);
+    }
+  }, [isOpen, defaultConnections]);
+
   // Auto-read clipboard or use initialUrl / incomingMeta on open
   useEffect(() => {
     if (isOpen) {

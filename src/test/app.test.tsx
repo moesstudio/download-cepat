@@ -652,7 +652,7 @@ describe('Download Cepat UI Suite', () => {
     expect(screen.getAllByText('Ujang Mustamar').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Copyright © 2026 Ujang Mustamar')).toBeInTheDocument();
     expect(screen.getByText('MIT')).toBeInTheDocument();
-    expect(screen.getAllByText(/v1\.0\.2/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/v1\.0\.3/).length).toBeGreaterThanOrEqual(2);
 
     // Switch to Browser Extension tab and confirm official module branding renders cleanly
     fireEvent.click(screen.getByRole('button', { name: 'Ekstensi Browser' }));
@@ -698,14 +698,14 @@ describe('Download Cepat UI Suite', () => {
 
   it('F18: Checks for app updates in Settings About tab, shows update banner, and invokes install', async () => {
     const checkSpy = vi.spyOn(nativeBridge, 'checkForAppUpdate').mockResolvedValue({
-      currentVersion: '1.0.2',
-      latestVersion: '1.0.3',
+      currentVersion: '1.0.3',
+      latestVersion: '1.0.4',
       updateAvailable: true,
-      releaseUrl: 'https://github.com/moesstudio/download-cepat/releases/tag/v1.0.3',
+      releaseUrl: 'https://github.com/moesstudio/download-cepat/releases/tag/v1.0.4',
       releaseNotes: 'Auto-update & bug fixes',
       publishedAt: '2026-11-16T00:00:00Z',
-      assetName: 'Download.Cepat_1.0.3_x64-setup.exe',
-      assetUrl: 'https://github.com/moesstudio/download-cepat/releases/download/v1.0.3/Download.Cepat_1.0.3_x64-setup.exe',
+      assetName: 'Download.Cepat_1.0.4_x64-setup.exe',
+      assetUrl: 'https://github.com/moesstudio/download-cepat/releases/download/v1.0.4/Download.Cepat_1.0.4_x64-setup.exe',
       assetSize: 4730815,
       assetSha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       installKind: 'windows_nsis',
@@ -713,8 +713,8 @@ describe('Download Cepat UI Suite', () => {
     });
     const installSpy = vi.spyOn(nativeBridge, 'downloadAndInstallAppUpdate').mockResolvedValue({
       startedInPlace: false,
-      message: 'Simulasi pembaruan v1.0.3 diverifikasi SHA-256.',
-      assetPath: '/tmp/Download.Cepat_1.0.3_x64-setup.exe',
+      message: 'Simulasi pembaruan v1.0.4 diverifikasi SHA-256.',
+      assetPath: '/tmp/Download.Cepat_1.0.4_x64-setup.exe',
     });
 
     try {
@@ -736,7 +736,7 @@ describe('Download Cepat UI Suite', () => {
       fireEvent.click(screen.getByRole('button', { name: /Cek Pembaruan Sekarang/i }));
       await waitFor(() => {
         expect(checkSpy).toHaveBeenCalledTimes(1);
-        expect(screen.getByText('Pembaruan v1.0.3 Tersedia')).toBeInTheDocument();
+        expect(screen.getByText('Pembaruan v1.0.4 Tersedia')).toBeInTheDocument();
         expect(screen.getByRole('region', { name: 'Pembaruan Aplikasi (Auto-Update)' })).toBeInTheDocument();
       });
 
@@ -746,12 +746,94 @@ describe('Download Cepat UI Suite', () => {
 
       await waitFor(() => {
         expect(installSpy).toHaveBeenCalledTimes(1);
-        expect(screen.getAllByText(/Simulasi pembaruan v1\.0\.3/).length).toBeGreaterThan(0);
+        expect(screen.getAllByText(/Simulasi pembaruan v1\.0\.4/).length).toBeGreaterThan(0);
       });
     } finally {
       checkSpy.mockRestore();
       installSpy.mockRestore();
       localStorage.removeItem('download_cepat_auto_update');
+    }
+  });
+
+  it('F19: Syncs 32-thread setting to Rust runtime and renders 32 parallel segments in progress modal', () => {
+    localStorage.removeItem('download_cepat_settings');
+    localStorage.removeItem('download_cepat_lang');
+    const syncSpy = vi.spyOn(nativeBridge, 'syncRuntimeSettings').mockResolvedValue();
+
+    try {
+      render(<App />);
+
+      const settingsBtn = screen.getByTitle('Pengaturan & Batas Kecepatan');
+      fireEvent.click(settingsBtn);
+
+      const selectInputs = screen.getAllByRole('combobox');
+      const threadSelect = selectInputs.find((s) => s.innerHTML.includes('32 Thread'));
+      const maxTasksSelect = selectInputs.find((s) => s.innerHTML.includes('5 Task'));
+      expect(threadSelect).toBeDefined();
+      expect(maxTasksSelect).toBeDefined();
+
+      if (maxTasksSelect) {
+        fireEvent.change(maxTasksSelect, { target: { value: '5' } });
+      }
+      if (threadSelect) {
+        fireEvent.change(threadSelect, { target: { value: '32' } });
+      }
+
+      fireEvent.click(screen.getByRole('button', { name: /Simpan Pengaturan/i }));
+
+      expect(syncSpy).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          defaultConnections: 32,
+          maxTasks: 5,
+          videoSaveDir: '~/Downloads/Video',
+          musicSaveDir: '~/Downloads/Music',
+        })
+      );
+      expect(screen.getByText('32 Thread / Task')).toBeInTheDocument();
+      expect(screen.getByText('32 Thread')).toBeInTheDocument();
+
+      const thirtyTwoSegments = Array.from({ length: 32 }, (_, idx) => ({
+        segmentIndex: idx,
+        startByte: idx * 1024,
+        endByte: (idx + 1) * 1024 - 1,
+        currentByte: idx === 0 ? 1024 : idx * 1024 + 512,
+        downloadedBytes: idx === 0 ? 1024 : 512,
+        isCompleted: idx === 0,
+      }));
+
+      render(
+        <DownloadProgressModal
+          isOpen={true}
+          task={{
+            id: 'task-32-video',
+            url: 'https://www.youtube.com/watch?v=Jdj13fGMmmA',
+            fileName: 'BigVideo_1080p.mp4',
+            fileSize: 32768,
+            downloadedBytes: 16896,
+            status: 'downloading',
+            categoryId: 'video',
+            destinationPath: '~/Downloads/Video/BigVideo_1080p.mp4',
+            supportsRange: true,
+            numConnections: 32,
+            speedLimitBytesPerSec: 0,
+            speedBytesPerSec: 8_000_000,
+            etaSeconds: 2,
+            progressPercent: 51.5,
+            segments: thirtyTwoSegments,
+            createdAt: new Date().toISOString(),
+          }}
+          onClose={vi.fn()}
+          onPause={vi.fn()}
+          onResume={vi.fn()}
+          onCancel={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText(/Koneksi Paralel \(32 thread\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/1 \/ 32 selesai/i)).toBeInTheDocument();
+    } finally {
+      syncSpy.mockRestore();
+      localStorage.removeItem('download_cepat_settings');
     }
   });
 });
