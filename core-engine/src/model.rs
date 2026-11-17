@@ -41,7 +41,7 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoFormat {
     pub format_id: String,
@@ -54,7 +54,7 @@ pub struct VideoFormat {
     pub is_audio_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaInfo {
     pub title: String,
@@ -63,14 +63,14 @@ pub struct MediaInfo {
     pub formats: Vec<VideoFormat>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TorrentFileEntry {
     pub path: String,
     pub length: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TorrentInfo {
     pub info_hash: String,
@@ -84,7 +84,7 @@ pub struct TorrentInfo {
     pub is_magnet: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectResult {
     pub url: String,
@@ -101,7 +101,7 @@ pub struct InspectResult {
     pub torrent_info: Option<TorrentInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentProgress {
     pub segment_index: usize,
     pub start_byte: u64,

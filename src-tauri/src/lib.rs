@@ -454,13 +454,12 @@ fn is_ytdlp_stream_fragment_file(file_name: &str, stem: &str) -> bool {
     !format_id.is_empty() && format_id.chars().all(|c| c.is_ascii_digit())
 }
 
+fn try_remove_file(path: &Path) -> bool {
+    path.is_file() && std::fs::remove_file(path).is_ok()
+}
+
 fn cleanup_download_artifacts(target: &Path) -> usize {
     let mut removed_count = 0usize;
-    let mut remove_if_exists = |path: &Path| {
-        if path.is_file() && std::fs::remove_file(path).is_ok() {
-            removed_count += 1;
-        }
-    };
 
     let torrent_meta = core_engine::torrent::torrent_checkpoint_path(target);
     if target.is_dir() && torrent_meta.is_file() {
@@ -488,7 +487,9 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
         direct_candidates.push(PathBuf::from(format!("{}.ytdl", temp_stream.display())));
     }
     for candidate in &direct_candidates {
-        remove_if_exists(candidate);
+        if try_remove_file(candidate) {
+            removed_count += 1;
+        }
     }
 
     if let (Some(parent), Some(target_name)) = (
@@ -528,7 +529,9 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
                         || name.starts_with(&format!("{}.mux.", target_name)));
 
                 if target_frag || temp_frag || stream_split || split_temp {
-                    remove_if_exists(&path);
+                    if try_remove_file(&path) {
+                        removed_count += 1;
+                    }
                 }
             }
         }
@@ -5561,7 +5564,9 @@ fn build_firefox_manifest_json(host_path: &str) -> String {
 /// Configures Chrome, Edge, Brave, Chromium, and Vivaldi External Extensions to detect and prompt
 /// users to enable Download Cepat directly from the Chrome Web Store on browser startup.
 pub fn sync_external_extensions() -> usize {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let Some(home) = user_home_dir() else { return 0 };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let json_content = serde_json::to_string_pretty(&serde_json::json!({
         "external_update_url": "https://clients2.google.com/service/update2/crx"
     }))
@@ -6605,7 +6610,6 @@ fi
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
