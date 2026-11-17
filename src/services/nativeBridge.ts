@@ -425,7 +425,7 @@ export const OFFICIAL_RELEASES_URL = 'https://github.com/moesstudio/download-cep
 
 export const FALLBACK_BUILD_INFO: BuildInfo = {
   appName: 'Download Cepat',
-  version: '1.0.4',
+  version: '1.0.5',
   author: 'Ujang Mustamar',
   publisher: 'Ujang Mustamar',
   copyright: 'Copyright © 2026 Ujang Mustamar',

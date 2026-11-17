@@ -1,6 +1,6 @@
 [package]
 name = "download-cepat-app"
-version = "1.0.4"
+version = "1.0.5"
 description = "Download Cepat — High-speed multi-connection download manager"
 authors = ["Ujang Mustamar"]
 license = "MIT"

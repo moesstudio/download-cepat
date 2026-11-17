@@ -677,7 +677,7 @@ describe('Download Cepat UI Suite', () => {
     expect(screen.getAllByText('Ujang Mustamar').length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText('Copyright © 2026 Ujang Mustamar')).toBeInTheDocument();
     expect(screen.getByText('MIT')).toBeInTheDocument();
-    expect(screen.getAllByText(/v1\.0\.4/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/v1\.0\.5/).length).toBeGreaterThanOrEqual(2);
 
     // Switch to Browser Extension tab and confirm official module branding renders cleanly
     fireEvent.click(screen.getByRole('button', { name: 'Browser Extension' }));
@@ -721,14 +721,14 @@ describe('Download Cepat UI Suite', () => {
 
   it('F18: Checks for app updates in Settings About tab, shows update banner, and invokes install', async () => {
     const checkSpy = vi.spyOn(nativeBridge, 'checkForAppUpdate').mockResolvedValue({
-      currentVersion: '1.0.4',
-      latestVersion: '1.0.5',
+      currentVersion: '1.0.5',
+      latestVersion: '1.0.6',
       updateAvailable: true,
-      releaseUrl: 'https://github.com/moesstudio/download-cepat/releases/tag/v1.0.5',
+      releaseUrl: 'https://github.com/moesstudio/download-cepat/releases/tag/v1.0.6',
       releaseNotes: 'Auto-update & bug fixes',
-      publishedAt: '2026-11-16T00:00:00Z',
-      assetName: 'Download.Cepat_1.0.5_x64-setup.exe',
-      assetUrl: 'https://github.com/moesstudio/download-cepat/releases/download/v1.0.5/Download.Cepat_1.0.5_x64-setup.exe',
+      publishedAt: '2026-11-17T00:00:00Z',
+      assetName: 'Download.Cepat_1.0.6_x64-setup.exe',
+      assetUrl: 'https://github.com/moesstudio/download-cepat/releases/download/v1.0.6/Download.Cepat_1.0.6_x64-setup.exe',
       assetSize: 4730815,
       assetSha256: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       installKind: 'windows_nsis',
@@ -736,8 +736,8 @@ describe('Download Cepat UI Suite', () => {
     });
     const installSpy = vi.spyOn(nativeBridge, 'downloadAndInstallAppUpdate').mockResolvedValue({
       startedInPlace: false,
-      message: 'Simulated v1.0.5 update verified by SHA-256.',
-      assetPath: '/tmp/Download.Cepat_1.0.5_x64-setup.exe',
+      message: 'Simulated v1.0.6 update verified by SHA-256.',
+      assetPath: '/tmp/Download.Cepat_1.0.6_x64-setup.exe',
     });
 
     try {
@@ -757,7 +757,7 @@ describe('Download Cepat UI Suite', () => {
       fireEvent.click(screen.getByRole('button', { name: /Check for Updates/i }));
       await waitFor(() => {
         expect(checkSpy).toHaveBeenCalledTimes(1);
-        expect(screen.getByText('Update v1.0.5 Available')).toBeInTheDocument();
+        expect(screen.getByText('Update v1.0.6 Available')).toBeInTheDocument();
         expect(screen.getByRole('region', { name: 'Application Updates (Auto-Update)' })).toBeInTheDocument();
       });
 
@@ -767,7 +767,7 @@ describe('Download Cepat UI Suite', () => {
 
       await waitFor(() => {
         expect(installSpy).toHaveBeenCalledTimes(1);
-        expect(screen.getAllByText(/Simulated v1\.0\.5 update/).length).toBeGreaterThan(0);
+        expect(screen.getAllByText(/Simulated v1\.0\.6 update/).length).toBeGreaterThan(0);
       });
     } finally {
       checkSpy.mockRestore();

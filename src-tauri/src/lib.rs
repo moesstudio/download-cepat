@@ -9540,7 +9540,7 @@ mod tests {
         assert_eq!(info.publisher, "Ujang Mustamar");
         assert_eq!(info.copyright, "Copyright © 2026 Ujang Mustamar");
         assert_eq!(info.license, "MIT");
-        assert_eq!(info.version, "1.0.4");
+        assert_eq!(info.version, "1.0.5");
 
         let en = tray_labels_for_lang("en");
         assert_eq!(en.show, "Open Download Cepat");
