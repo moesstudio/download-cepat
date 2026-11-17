@@ -267,9 +267,26 @@ impl UrlInspector {
         raw_url: &str,
         opts: InspectOptions<'_>,
     ) -> Result<InspectResult> {
-        let parsed_url = Url::parse(raw_url).context("Format URL tidak valid")?;
+        let trimmed_raw = raw_url.trim();
+        if crate::torrent::is_magnet_uri(trimmed_raw) {
+            return crate::torrent::inspect_magnet(trimmed_raw);
+        }
+        if trimmed_raw.to_ascii_lowercase().starts_with("dc-torrent://") {
+            return crate::torrent::inspect_cached_torrent(trimmed_raw);
+        }
+        if trimmed_raw.to_ascii_lowercase().starts_with("file://")
+            && crate::torrent::is_torrent_reference(trimmed_raw)
+        {
+            if let Ok(u) = Url::parse(trimmed_raw) {
+                if let Ok(path) = u.to_file_path() {
+                    return crate::torrent::inspect_local_torrent_file(&path).map(|(_, r)| r);
+                }
+            }
+        }
+
+        let parsed_url = Url::parse(trimmed_raw).context("Format URL tidak valid")?;
         if parsed_url.scheme().eq_ignore_ascii_case("ftp") {
-            return crate::ftp::inspect_ftp(raw_url, opts.auth_username, opts.auth_password).await;
+            return crate::ftp::inspect_ftp(trimmed_raw, opts.auth_username, opts.auth_password).await;
         }
 
         let cookie = opts.cookie;
@@ -584,9 +601,48 @@ impl UrlInspector {
         // Clean filename (remove illegal characters)
         file_name = sanitize_filename(&file_name);
 
+        let is_http_torrent = file_name.to_ascii_lowercase().ends_with(".torrent")
+            || mime_type
+                .as_deref()
+                .map(|m| m.to_ascii_lowercase().contains("bittorrent"))
+                .unwrap_or(false)
+            || crate::torrent::is_torrent_reference(&final_url);
+
+        if is_http_torrent && file_size.unwrap_or(0) <= 16 * 1024 * 1024 {
+            if let Ok(t_resp) = send_with_redirects(
+                active_client,
+                reqwest::Method::GET,
+                raw_url,
+                cookie,
+                referer,
+                user_agent,
+                DEFAULT_USER_AGENT,
+                None,
+                auth_u,
+                auth_p,
+            )
+            .await
+            {
+                if t_resp.status().is_success() {
+                    if let Ok(bytes) = t_resp.bytes().await {
+                        if bytes.len() <= 16 * 1024 * 1024 {
+                            if let Ok(mut parsed_res) =
+                                crate::torrent::inspect_torrent_bytes(raw_url, &bytes)
+                            {
+                                parsed_res.final_url = final_url.clone();
+                                return Ok(parsed_res);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let media_info = detect_video_stream(raw_url, &final_url, &file_name, mime_type.as_deref(), file_size);
         let mut suggested_category = categorize_filename(&file_name);
-        if let Some(ref m) = media_info {
+        if is_http_torrent {
+            suggested_category = "torrents".to_string();
+        } else if let Some(ref m) = media_info {
             suggested_category = "video".to_string();
             if file_name == "watch" || file_name == "download.bin" || !file_name.contains('.') {
                 file_name = sanitize_filename(&format!("{}.mp4", m.title));
@@ -604,6 +660,7 @@ impl UrlInspector {
             last_modified,
             suggested_category,
             media_info,
+            torrent_info: None,
         })
     }
 }
@@ -771,6 +828,7 @@ pub fn categorize_filename(name: &str) -> String {
         "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" | "wma" | "opus" => "music".to_string(),
         "exe" | "msi" | "dmg" | "pkg" | "deb" | "rpm" | "appimage" | "apk" => "programs".to_string(),
         "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" | "ts" | "m4v" | "3gp" => "video".to_string(),
+        "torrent" => "torrents".to_string(),
         _ => "general".to_string(),
     }
 }

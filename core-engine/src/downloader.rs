@@ -274,6 +274,17 @@ impl Downloader {
         options: DownloadOptions<'_>,
     ) -> Result<()> {
         let controller = controller.unwrap_or_else(DownloadController::new);
+        if crate::torrent::is_torrent_reference(url) {
+            return crate::torrent::download_torrent(
+                task_id,
+                url,
+                destination_path,
+                telemetry_tx,
+                controller,
+                &options,
+            )
+            .await;
+        }
         if url.trim().to_ascii_lowercase().starts_with("ftp://") {
             return crate::ftp::download_ftp(
                 task_id,
@@ -469,6 +480,8 @@ impl Downloader {
                 eta_seconds: None,
                 status: TaskStatus::Downloading,
                 segments: init_segs,
+                peers: None,
+                seeds: None,
             });
         }
 
@@ -580,6 +593,8 @@ impl Downloader {
                             eta_seconds: eta,
                             status: TaskStatus::Downloading,
                             segments: segment_progresses,
+                            peers: None,
+                            seeds: None,
                         };
 
                         if let Some(ref sender) = tx {
@@ -680,6 +695,8 @@ impl Downloader {
                     eta_seconds: None,
                     status: TaskStatus::Canceled,
                     segments: vec![],
+                    peers: None,
+                    seeds: None,
                 });
             }
             return Ok(());
@@ -704,6 +721,8 @@ impl Downloader {
                     eta_seconds: None,
                     status: TaskStatus::Paused,
                     segments: build_segment_progresses(&final_segments, &final_seg_values),
+                    peers: None,
+                    seeds: None,
                 });
             }
             return Ok(());
@@ -754,6 +773,8 @@ impl Downloader {
                 eta_seconds: Some(0),
                 status: TaskStatus::Completed,
                 segments: completed_segs,
+                peers: None,
+                seeds: None,
             };
             let _ = sender.send(telemetry);
         }

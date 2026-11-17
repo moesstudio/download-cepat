@@ -34,23 +34,23 @@ const INTERCEPT_MIME_PREFIXES = [
 
 let isInterceptionEnabled = true;
 let excludedDomains = [];
-let currentExtLang = "id";
+let currentExtLang = "en";
 const tabMediaStreams = new Map(); // tabId -> Array<{ url, mimeType, fileSize, label }>
 
 const BG_I18N = {
-  id: {
-    singleLinkTitle: "Download dengan Download Cepat ⚡",
-    allLinksTitle: "Download Semua Link di Halaman Ini ⚡",
-    noActiveTab: "Tab aktif tidak ditemukan",
-    noLinksFound: "Tidak ada link unduhan yang ditemukan di halaman ini.",
-    desktopNoResp: "Aplikasi Download Cepat desktop belum merespons."
-  },
   en: {
     singleLinkTitle: "Download with Download Cepat ⚡",
     allLinksTitle: "Download All Links on This Page ⚡",
     noActiveTab: "Active tab not found",
     noLinksFound: "No downloadable links found on this page.",
     desktopNoResp: "Download Cepat desktop app did not respond."
+  },
+  id: {
+    singleLinkTitle: "Download dengan Download Cepat ⚡",
+    allLinksTitle: "Download Semua Link di Halaman Ini ⚡",
+    noActiveTab: "Tab aktif tidak ditemukan",
+    noLinksFound: "Tidak ada link unduhan yang ditemukan di halaman ini.",
+    desktopNoResp: "Aplikasi Download Cepat desktop belum merespons."
   },
   ms: {
     singleLinkTitle: "Muat Turun dengan Download Cepat ⚡",
@@ -59,17 +59,101 @@ const BG_I18N = {
     noLinksFound: "Tiada pautan muat turun ditemui di halaman ini.",
     desktopNoResp: "Aplikasi desktop Download Cepat tidak memberi respons."
   },
+  zh: {
+    singleLinkTitle: "使用 Download Cepat 下载 ⚡",
+    allLinksTitle: "下载此页面所有链接 ⚡",
+    noActiveTab: "未找到活动标签页",
+    noLinksFound: "此页面未找到可下载的链接。",
+    desktopNoResp: "Download Cepat 桌面应用未响应。"
+  },
   ja: {
     singleLinkTitle: "Download Cepat でダウンロード ⚡",
     allLinksTitle: "このページの全リンクをダウンロード ⚡",
     noActiveTab: "アクティブタブが見つかりません",
     noLinksFound: "このページにダウンロード可能なリンクが見つかりません。",
     desktopNoResp: "デスクトップ版 Download Cepat が応答しません。"
+  },
+  ko: {
+    singleLinkTitle: "Download Cepat으로 다운로드 ⚡",
+    allLinksTitle: "이 페이지의 모든 링크 다운로드 ⚡",
+    noActiveTab: "활성 탭을 찾을 수 없습니다",
+    noLinksFound: "이 페이지에서 다운로드 가능한 링크를 찾지 못했습니다.",
+    desktopNoResp: "Download Cepat 데스크톱 앱이 응답하지 않습니다."
+  },
+  es: {
+    singleLinkTitle: "Descargar con Download Cepat ⚡",
+    allLinksTitle: "Descargar todos los enlaces de esta página ⚡",
+    noActiveTab: "No se encontró pestaña activa",
+    noLinksFound: "No se encontraron enlaces descargables en esta página.",
+    desktopNoResp: "La aplicación de escritorio Download Cepat no respondió."
+  },
+  fr: {
+    singleLinkTitle: "Télécharger avec Download Cepat ⚡",
+    allLinksTitle: "Télécharger tous les liens de cette page ⚡",
+    noActiveTab: "Aucun onglet actif trouvé",
+    noLinksFound: "Aucun lien téléchargeable trouvé sur cette page.",
+    desktopNoResp: "L'application de bureau Download Cepat n'a pas répondu."
+  },
+  de: {
+    singleLinkTitle: "Mit Download Cepat herunterladen ⚡",
+    allLinksTitle: "Alle Links dieser Seite herunterladen ⚡",
+    noActiveTab: "Kein aktiver Tab gefunden",
+    noLinksFound: "Keine herunterladbaren Links auf dieser Seite gefunden.",
+    desktopNoResp: "Die Desktop-App Download Cepat hat nicht geantwortet."
+  },
+  pt: {
+    singleLinkTitle: "Baixar com Download Cepat ⚡",
+    allLinksTitle: "Baixar todos os links desta página ⚡",
+    noActiveTab: "Aba ativa não encontrada",
+    noLinksFound: "Nenhum link para download encontrado nesta página.",
+    desktopNoResp: "O aplicativo Download Cepat não respondeu."
+  },
+  ru: {
+    singleLinkTitle: "Скачать через Download Cepat ⚡",
+    allLinksTitle: "Скачать все ссылки на странице ⚡",
+    noActiveTab: "Активная вкладка не найдена",
+    noLinksFound: "На этой странице не найдено ссылок для скачивания.",
+    desktopNoResp: "Десктопное приложение Download Cepat не отвечает."
+  },
+  ar: {
+    singleLinkTitle: "تنزيل عبر Download Cepat ⚡",
+    allLinksTitle: "تنزيل جميع الروابط في هذه الصفحة ⚡",
+    noActiveTab: "لم يتم العثور على علامة تبويب نشطة",
+    noLinksFound: "لم يتم العثور على روابط قابلة للتنزيل في هذه الصفحة.",
+    desktopNoResp: "تطبيق سطح المكتب Download Cepat لم يستجب."
+  },
+  hi: {
+    singleLinkTitle: "Download Cepat से डाउनलोड करें ⚡",
+    allLinksTitle: "इस पृष्ठ के सभी लिंक डाउनलोड करें ⚡",
+    noActiveTab: "सक्रिय टैब नहीं मिला",
+    noLinksFound: "इस पृष्ठ पर कोई डाउनलोड लिंक नहीं मिला।",
+    desktopNoResp: "Download Cepat डेस्कटॉप ऐप ने उत्तर नहीं दिया।"
+  },
+  vi: {
+    singleLinkTitle: "Tải xuống bằng Download Cepat ⚡",
+    allLinksTitle: "Tải tất cả liên kết trên trang này ⚡",
+    noActiveTab: "Không tìm thấy tab đang hoạt động",
+    noLinksFound: "Không tìm thấy liên kết tải xuống nào trên trang này.",
+    desktopNoResp: "Ứng dụng máy tính Download Cepat không phản hồi."
+  },
+  th: {
+    singleLinkTitle: "ดาวน์โหลดด้วย Download Cepat ⚡",
+    allLinksTitle: "ดาวน์โหลดลิงก์ทั้งหมดในหน้านี้ ⚡",
+    noActiveTab: "ไม่พบแท็บที่ใช้งานอยู่",
+    noLinksFound: "ไม่พบลิงก์ที่ดาวน์โหลดได้ในหน้านี้",
+    desktopNoResp: "แอปเดสก์ท็อป Download Cepat ไม่ตอบสนอง"
+  },
+  tr: {
+    singleLinkTitle: "Download Cepat ile İndir ⚡",
+    allLinksTitle: "Bu Sayfadaki Tüm Bağlantıları İndir ⚡",
+    noActiveTab: "Etkin sekme bulunamadı",
+    noLinksFound: "Bu sayfada indirilebilir bağlantı bulunamadı.",
+    desktopNoResp: "Download Cepat masaüstü uygulaması yanıt vermedi."
   }
 };
 
 function getBgDict() {
-  return BG_I18N[currentExtLang] || BG_I18N.id;
+  return BG_I18N[currentExtLang] || BG_I18N.en;
 }
 
 function syncContextMenusLanguage() {
@@ -473,8 +557,16 @@ async function collectAndSendAllPageLinks(tab) {
       const items = [];
       const addUrl = (raw, label) => {
         if (!raw) return;
+        const rawTrimmed = String(raw).trim();
+        if (/^magnet:\?xt=/i.test(rawTrimmed)) {
+          if (!seen.has(rawTrimmed)) {
+            seen.add(rawTrimmed);
+            items.push({ url: rawTrimmed, label: (label || "Magnet Torrent").trim().slice(0, 80) });
+          }
+          return;
+        }
         try {
-          const abs = new URL(raw, document.baseURI).href;
+          const abs = new URL(rawTrimmed, document.baseURI).href;
           if ((abs.startsWith("http://") || abs.startsWith("https://") || abs.startsWith("ftp://")) && !seen.has(abs)) {
             seen.add(abs);
             items.push({ url: abs, label: (label || "").trim().slice(0, 80) });

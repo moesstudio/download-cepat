@@ -3,7 +3,7 @@ import { LanguageCode, translate } from '../i18n/translations.ts';
 export function formatEta(
   seconds?: number | null,
   verbose: boolean = false,
-  lang: LanguageCode = 'id'
+  lang: LanguageCode = 'en'
 ): string {
   if (!seconds || seconds <= 0 || !Number.isFinite(seconds)) return '-';
   const total = Math.ceil(seconds);

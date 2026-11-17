@@ -13,6 +13,7 @@ import {
   DownloadTask,
   FileChecksums,
   IncomingDownloadMeta,
+  PopupTaskEventPayload,
   PostDownloadAction,
   ProxyConfig,
   SchedulerConfig,
@@ -34,6 +35,9 @@ import { MiniDropTarget } from './components/MiniDropTarget.tsx';
 import {
   openNativeFolder,
   openNativeFile,
+  inspectNativeUrlDetailed,
+  inspectTorrentBytes,
+  openDownloadPopup,
   triggerRealDownload,
   pauseRealDownload,
   cancelRealDownload,
@@ -59,6 +63,7 @@ import {
   deriveFileNameFromUrl,
   findMatchingSiteLogin,
   formatProxyUrl,
+  isTorrentReference,
   isWithinScheduleWindow,
   joinDestinationPath,
   matchCategoryForFile,
@@ -69,6 +74,7 @@ import {
   I18nProvider,
   LANGUAGE_OPTIONS,
   LanguageCode,
+  isRtlLanguage,
   isValidLanguage,
   translate,
 } from './i18n/index.tsx';
@@ -79,6 +85,7 @@ const INITIAL_CATEGORIES: Category[] = [
   { id: 'music', name: 'Music', icon: 'music', extensions: ['.mp3', '.flac', '.wav'], count: 1 },
   { id: 'programs', name: 'Programs', icon: 'cpu', extensions: ['.dmg', '.exe', '.pkg'], count: 1 },
   { id: 'video', name: 'Video', icon: 'video', extensions: ['.mp4', '.mkv', '.mov'], count: 1 },
+  { id: 'torrents', name: 'Torrents', icon: 'magnet', extensions: ['.torrent'], count: 0 },
 ];
 
 const INITIAL_TASKS: DownloadTask[] = [
@@ -180,7 +187,7 @@ export const App: React.FC = () => {
       const saved = localStorage.getItem('download_cepat_lang');
       if (isValidLanguage(saved)) return saved;
     } catch {}
-    return 'id';
+    return 'en';
   });
   const langRef = React.useRef<LanguageCode>(lang);
   useEffect(() => {
@@ -190,6 +197,7 @@ export const App: React.FC = () => {
     } catch {}
     if (typeof document !== 'undefined') {
       document.documentElement.lang = lang;
+      document.documentElement.dir = isRtlLanguage(lang) ? 'rtl' : 'ltr';
     }
     void setTrayLanguage(lang);
   }, [lang]);
@@ -206,7 +214,11 @@ export const App: React.FC = () => {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
           return parsed.map((t: DownloadTask) => {
-            if (t.status === 'downloading' || t.status === 'connecting') {
+            if (
+              t.status === 'downloading' ||
+              t.status === 'connecting' ||
+              t.status === 'assembling'
+            ) {
               return { ...t, status: 'paused' as const, speedBytesPerSec: 0, etaSeconds: 0 };
             }
             return t;
@@ -314,7 +326,16 @@ export const App: React.FC = () => {
   const [categoryRules, setCategoryRules] = useState<CategoryRule[]>(() => {
     try {
       const saved = localStorage.getItem('download_cepat_category_rules');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          if (parsed.some((r: CategoryRule) => r?.id === 'torrents')) {
+            return parsed;
+          }
+          const defaultTorrents = DEFAULT_CATEGORY_RULES.find((r) => r.id === 'torrents');
+          return defaultTorrents ? [...parsed, defaultTorrents] : parsed;
+        }
+      }
     } catch {}
     return DEFAULT_CATEGORY_RULES;
   });
@@ -333,6 +354,8 @@ export const App: React.FC = () => {
       nextRules.find((r) => r.id === 'video')?.saveDir || '~/Downloads/Video';
     const musicDir =
       nextRules.find((r) => r.id === 'music')?.saveDir || '~/Downloads/Music';
+    const torrentsDir =
+      nextRules.find((r) => r.id === 'torrents')?.saveDir || '~/Downloads/Torrents';
     void syncRuntimeSettings({
       defaultConnections: normalizeConnections(nextSettings.defaultConnections),
       maxTasks: normalizeMaxTasks(nextSettings.maxTasks),
@@ -340,6 +363,7 @@ export const App: React.FC = () => {
       proxyUrl: formatProxyUrl(nextProxy) || null,
       videoSaveDir: videoDir,
       musicSaveDir: musicDir,
+      torrentsSaveDir: torrentsDir,
     });
   };
 
@@ -401,6 +425,7 @@ export const App: React.FC = () => {
 
   // Modals
   const [isAddUrlOpen, setIsAddUrlOpen] = useState(false);
+  const [addUrlInitialMode, setAddUrlInitialMode] = useState<'url' | 'torrent'>('url');
   const [isProgressOpen, setIsProgressOpen] = useState(false);
   const [isCompleteOpen, setIsCompleteOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -423,12 +448,82 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [activeDetailTaskId, setActiveDetailTaskId] = useState<string | null>(null);
+  const activeDetailTaskIdRef = React.useRef<string | null>(activeDetailTaskId);
+  useEffect(() => {
+    activeDetailTaskIdRef.current = activeDetailTaskId;
+  }, [activeDetailTaskId]);
+
   const activeDetailTask = React.useMemo(() => {
     return tasks.find((t) => t.id === activeDetailTaskId) || null;
   }, [tasks, activeDetailTaskId]);
   const propertiesTask = React.useMemo(() => {
     return tasks.find((t) => t.id === propertiesTaskId) || null;
   }, [tasks, propertiesTaskId]);
+
+  const openAddDownloadEntry = React.useCallback(
+    (opts?: {
+      initialMode?: 'url' | 'torrent';
+      url?: string;
+      fileName?: string;
+      source?: 'manual' | 'browser' | 'clipboard' | 'tray' | 'drop';
+      cookie?: string;
+      referer?: string;
+      userAgent?: string;
+      fileSize?: number | null;
+      mimeType?: string;
+    }) => {
+      const mode: 'url' | 'torrent' =
+        opts?.initialMode ??
+        (opts?.url && isTorrentReference(opts.url) ? 'torrent' : 'url');
+
+      const openFallbackModal = () => {
+        setAddUrlInitialMode(mode);
+        if (
+          opts?.url &&
+          (opts.fileName ||
+            opts.cookie ||
+            opts.referer ||
+            opts.userAgent ||
+            opts.fileSize != null ||
+            opts.mimeType)
+        ) {
+          setIncomingMeta({
+            url: opts.url,
+            fileName: opts.fileName,
+            cookie: opts.cookie,
+            referer: opts.referer,
+            userAgent: opts.userAgent,
+            fileSize: opts.fileSize ?? undefined,
+            mimeType: opts.mimeType,
+          });
+        } else {
+          setIncomingMeta(undefined);
+        }
+        setIncomingUrl(opts?.url);
+        setIsAddUrlOpen(true);
+      };
+
+      if (isTauri()) {
+        void openDownloadPopup({
+          source: opts?.source ?? 'manual',
+          initialMode: mode,
+          url: opts?.url,
+          fileName: opts?.fileName,
+          cookie: opts?.cookie,
+          referer: opts?.referer,
+          userAgent: opts?.userAgent,
+          fileSize: opts?.fileSize ?? null,
+          mimeType: opts?.mimeType ?? null,
+        }).catch(() => {
+          openFallbackModal();
+        });
+        return;
+      }
+
+      openFallbackModal();
+    },
+    []
+  );
 
   const [toast, setToast] = useState<{ message: string; type: 'info' | 'success' | 'warning' } | null>(null);
   const toastTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -573,12 +668,16 @@ export const App: React.FC = () => {
       destination_path: string;
       segments?: DownloadSegment[];
       error?: string;
+      peers?: number;
+      seeds?: number;
     }>('download-telemetry', (event) => {
       const p = event.payload;
       const isCompleted = p.status === 'completed';
       const isError = p.status === 'error';
       const isPaused = p.status === 'paused';
       const isCanceled = p.status === 'canceled';
+      const isAssembling = p.status === 'assembling';
+      const isConnecting = p.status === 'connecting';
       const isStopped = isCompleted || isError || isPaused || isCanceled;
 
       if (isError) {
@@ -599,6 +698,10 @@ export const App: React.FC = () => {
               ? 'paused'
               : isCanceled
               ? 'canceled'
+              : isAssembling
+              ? 'assembling'
+              : isConnecting
+              ? 'connecting'
               : 'downloading';
             const nextDest = p.destination_path || t.destinationPath;
             const destBase = nextDest.split(/[\\/]/).pop();
@@ -667,6 +770,8 @@ export const App: React.FC = () => {
               completedAt: isCompleted ? new Date().toISOString() : t.completedAt,
               destinationPath: nextDest,
               segments: nextSegments,
+              peers: typeof p.peers === 'number' ? p.peers : t.peers,
+              seeds: typeof p.seeds === 'number' ? p.seeds : t.seeds,
             };
           }
           return t;
@@ -674,8 +779,10 @@ export const App: React.FC = () => {
       );
 
       if (isCompleted) {
-        setIsProgressOpen(false);
-        setIsCompleteOpen(true);
+        if (activeDetailTaskIdRef.current === p.task_id) {
+          setIsProgressOpen(false);
+          setIsCompleteOpen(true);
+        }
         showToast(translate(langRef.current, 'toast.downloadComplete'), 'success');
       }
     }).then((unlisten) => {
@@ -739,16 +846,18 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        setIsAddUrlOpen(true);
+        openAddDownloadEntry({ initialMode: 'url', source: 'manual' });
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [openAddDownloadEntry]);
 
-  // Listen for background tasks started from Browser Dropdown menu & manual modal trigger
+  // Listen for background tasks started from Browser Dropdown menu, IDM Popups & manual fallback
   useEffect(() => {
     let unlistenExternal: (() => void) | undefined;
+    let unlistenPopupStarted: (() => void) | undefined;
+    let unlistenPopupQueued: (() => void) | undefined;
     let unlistenBrowser: (() => void) | undefined;
 
     if (isTauri()) {
@@ -818,8 +927,100 @@ export const App: React.FC = () => {
         unlistenExternal = unsub;
       }).catch((e) => console.warn('Could not listen for external-task-added:', e));
 
+      listen<PopupTaskEventPayload>('popup-download-started', (event) => {
+        const p = event.payload;
+        if (!p || !p.id) return;
+        const mappedStatus: TaskStatus =
+          p.status === 'completed'
+            ? 'completed'
+            : p.status === 'queued'
+            ? 'queued'
+            : 'downloading';
+        const newTask: DownloadTask = {
+          id: p.id,
+          url: p.url,
+          fileName: p.fileName,
+          destinationPath: p.destinationPath,
+          fileSize: p.fileSize ?? null,
+          downloadedBytes: p.downloadedBytes || 0,
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+          progressPercent: p.progressPercent || 0,
+          status: mappedStatus,
+          categoryId: p.categoryId || 'general',
+          supportsRange: p.supportsRange,
+          mimeType: p.mimeType ?? undefined,
+          numConnections: p.numConnections || settingsRef.current.defaultConnections,
+          speedLimitBytesPerSec: p.speedLimitBytesPerSec || 0,
+          formatId: p.formatId ?? undefined,
+          resolution: p.resolution ?? undefined,
+          cookie: p.cookie ?? undefined,
+          referer: p.referer ?? undefined,
+          userAgent: p.userAgent ?? undefined,
+          proxyUrl: p.proxyUrl ?? undefined,
+          authUsername: p.authUsername ?? undefined,
+          authPassword: p.authPassword ?? undefined,
+          createdAt: new Date().toISOString(),
+          completedAt: mappedStatus === 'completed' ? new Date().toISOString() : undefined,
+        };
+        setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== p.id)]);
+        setSelectedTaskId(p.id);
+        if (mappedStatus === 'completed') {
+          showToast(translate(langRef.current, 'toast.downloadComplete'), 'success');
+        } else if (newTask.categoryId === 'torrents') {
+          showToast(
+            translate(langRef.current, 'toast.torrentAdded', { name: newTask.fileName }),
+            'success'
+          );
+        }
+      }).then((unsub) => {
+        unlistenPopupStarted = unsub;
+      }).catch((e) => console.warn('Could not listen for popup-download-started:', e));
+
+      listen<PopupTaskEventPayload>('popup-download-queued', (event) => {
+        const p = event.payload;
+        if (!p || !p.id) return;
+        const mappedStatus: TaskStatus = p.status === 'completed' ? 'completed' : 'paused';
+        const newTask: DownloadTask = {
+          id: p.id,
+          url: p.url,
+          fileName: p.fileName,
+          destinationPath: p.destinationPath,
+          fileSize: p.fileSize ?? null,
+          downloadedBytes: p.downloadedBytes || 0,
+          speedBytesPerSec: 0,
+          etaSeconds: 0,
+          progressPercent: p.progressPercent || 0,
+          status: mappedStatus,
+          categoryId: p.categoryId || 'general',
+          supportsRange: p.supportsRange,
+          mimeType: p.mimeType ?? undefined,
+          numConnections: p.numConnections || settingsRef.current.defaultConnections,
+          speedLimitBytesPerSec: p.speedLimitBytesPerSec || 0,
+          formatId: p.formatId ?? undefined,
+          resolution: p.resolution ?? undefined,
+          cookie: p.cookie ?? undefined,
+          referer: p.referer ?? undefined,
+          userAgent: p.userAgent ?? undefined,
+          proxyUrl: p.proxyUrl ?? undefined,
+          authUsername: p.authUsername ?? undefined,
+          authPassword: p.authPassword ?? undefined,
+          createdAt: new Date().toISOString(),
+          completedAt: mappedStatus === 'completed' ? new Date().toISOString() : undefined,
+        };
+        setTasks((prev) => [newTask, ...prev.filter((t) => t.id !== p.id)]);
+        setSelectedTaskId(p.id);
+        showToast(
+          translate(langRef.current, 'toast.bgQueued', { name: p.fileName }),
+          'info'
+        );
+      }).then((unsub) => {
+        unlistenPopupQueued = unsub;
+      }).catch((e) => console.warn('Could not listen for popup-download-queued:', e));
+
       listen<IncomingDownloadMeta>('browser-add-download', (event) => {
         if (event.payload?.url) {
+          setAddUrlInitialMode(isTorrentReference(event.payload.url) ? 'torrent' : 'url');
           setIncomingMeta(event.payload);
           setIncomingUrl(event.payload.url);
           setIsAddUrlOpen(true);
@@ -836,6 +1037,8 @@ export const App: React.FC = () => {
     }
     return () => {
       if (unlistenExternal) unlistenExternal();
+      if (unlistenPopupStarted) unlistenPopupStarted();
+      if (unlistenPopupQueued) unlistenPopupQueued();
       if (unlistenBrowser) unlistenBrowser();
     };
   }, []);
@@ -873,13 +1076,13 @@ export const App: React.FC = () => {
     }).then((u) => { unlistenLinks = u; }).catch(() => {});
 
     listen('tray-add-url', () => {
-      setIsAddUrlOpen(true);
+      openAddDownloadEntry({ initialMode: 'url', source: 'tray' });
     }).then((u) => { unlistenTrayAdd = u; }).catch(() => {});
 
     listen('tray-pause-all', () => {
       setTasks((prev) =>
         prev.map((t) =>
-          t.status === 'downloading' || t.status === 'connecting'
+          t.status === 'downloading' || t.status === 'connecting' || t.status === 'assembling'
             ? { ...t, status: 'paused', speedBytesPerSec: 0, etaSeconds: 0 }
             : t
         )
@@ -893,7 +1096,14 @@ export const App: React.FC = () => {
         const paths = event.payload.paths || [];
         const collectedUrls: string[] = [];
         for (const path of paths) {
-          if (/\.(txt|ef2|lst)$/i.test(path)) {
+          if (/\.torrent$/i.test(path)) {
+            try {
+              const { result } = await inspectNativeUrlDetailed(path);
+              collectedUrls.push(result?.url || path);
+            } catch {
+              collectedUrls.push(path);
+            }
+          } else if (/\.(txt|ef2|lst)$/i.test(path)) {
             try {
               const content = await readTextFilePreview(path);
               collectedUrls.push(...parseUrlListText(content));
@@ -904,8 +1114,11 @@ export const App: React.FC = () => {
         }
         const unique = Array.from(new Set(collectedUrls));
         if (unique.length === 1) {
-          setIncomingUrl(unique[0]);
-          setIsAddUrlOpen(true);
+          openAddDownloadEntry({
+            url: unique[0],
+            initialMode: isTorrentReference(unique[0]) ? 'torrent' : 'url',
+            source: 'drop',
+          });
         } else if (unique.length > 1) {
           setBatchInitialText(unique.join('\n'));
           setBatchInitialTab('batch');
@@ -921,7 +1134,7 @@ export const App: React.FC = () => {
       if (unlistenTrayPause) unlistenTrayPause();
       if (unlistenDragDrop) unlistenDragDrop();
     };
-  }, []);
+  }, [openAddDownloadEntry]);
 
   // Background Clipboard Monitor (only when explicitly enabled by user)
   const lastClipboardRef = React.useRef<string>('');
@@ -933,8 +1146,11 @@ export const App: React.FC = () => {
       if (!active || !text || text === lastClipboardRef.current) return;
       if (shouldInterceptClipboardUrl(text, clipboardConfig)) {
         lastClipboardRef.current = text;
-        setIncomingUrl(text);
-        setIsAddUrlOpen(true);
+        openAddDownloadEntry({
+          url: text,
+          initialMode: isTorrentReference(text) ? 'torrent' : 'url',
+          source: 'clipboard',
+        });
         showToast(translate(langRef.current, 'toast.clipboardDetected'), 'info');
       }
     };
@@ -944,7 +1160,7 @@ export const App: React.FC = () => {
       active = false;
       clearInterval(timer);
     };
-  }, [clipboardConfig]);
+  }, [clipboardConfig, openAddDownloadEntry]);
 
   // Automatic Queue Promotion, Schedule Window Enforcement & Post-Download Automation
   const schedulerRef = React.useRef(schedulerConfig);
@@ -1028,7 +1244,11 @@ export const App: React.FC = () => {
     promoteQueuedTasks();
 
     const activeOrQueued = tasks.filter(
-      (t) => t.status === 'downloading' || t.status === 'connecting' || t.status === 'queued'
+      (t) =>
+        t.status === 'downloading' ||
+        t.status === 'connecting' ||
+        t.status === 'assembling' ||
+        t.status === 'queued'
     ).length;
     if (activeOrQueued > 0) {
       hadActiveQueueRef.current = true;
@@ -1069,7 +1289,9 @@ export const App: React.FC = () => {
   const categoryCounts = React.useMemo(() => {
     const counts: Record<string, number> = {
       all: tasks.length,
-      unfinished: tasks.filter((t) => ['downloading', 'paused', 'queued', 'connecting'].includes(t.status)).length,
+      unfinished: tasks.filter((t) =>
+        ['downloading', 'paused', 'queued', 'connecting', 'assembling'].includes(t.status)
+      ).length,
       completed: tasks.filter((t) => t.status === 'completed').length,
     };
     INITIAL_CATEGORIES.forEach((cat) => {
@@ -1081,7 +1303,8 @@ export const App: React.FC = () => {
   // Filter tasks by selected category & search
   const filteredTasks = tasks.filter((t) => {
     if (selectedCategoryId === 'unfinished') {
-      if (!['downloading', 'paused', 'queued', 'connecting'].includes(t.status)) return false;
+      if (!['downloading', 'paused', 'queued', 'connecting', 'assembling'].includes(t.status))
+        return false;
     } else if (selectedCategoryId === 'completed') {
       if (t.status !== 'completed') return false;
     } else if (selectedCategoryId !== 'all') {
@@ -1377,7 +1600,7 @@ export const App: React.FC = () => {
     const activeProxy = formatProxyUrl(proxyConfig);
     const created: DownloadTask[] = items.map((item, idx) => {
       const fileName = item.fileName || deriveFileNameFromUrl(item.url);
-      const { categoryId, saveDir } = matchCategoryForFile(fileName, categoryRules);
+      const { categoryId, saveDir } = matchCategoryForFile(fileName, categoryRules, item.url);
       const login = findMatchingSiteLogin(item.url, siteLogins);
       return {
         id: `task-${baseTime}-${idx}`,
@@ -1414,8 +1637,11 @@ export const App: React.FC = () => {
 
   const handleDropUrls = (urls: string[]) => {
     if (urls.length === 1) {
-      setIncomingUrl(urls[0]);
-      setIsAddUrlOpen(true);
+      openAddDownloadEntry({
+        url: urls[0],
+        initialMode: isTorrentReference(urls[0]) ? 'torrent' : 'url',
+        source: 'drop',
+      });
     } else if (urls.length > 1) {
       setBatchInitialText(urls.join('\n'));
       setBatchInitialTab('batch');
@@ -1438,7 +1664,7 @@ export const App: React.FC = () => {
     void stopAllRealDownloads();
     setTasks((prev) =>
       prev.map((t) =>
-        t.status === 'downloading' || t.status === 'connecting'
+        t.status === 'downloading' || t.status === 'connecting' || t.status === 'assembling'
           ? { ...t, status: 'paused', speedBytesPerSec: 0, etaSeconds: 0 }
           : t
       )
@@ -1539,6 +1765,28 @@ export const App: React.FC = () => {
     setMarkedTaskIds([]);
   };
 
+  const handleClearCompleted = () => {
+    const completedIds = new Set(
+      tasks.filter((t) => t.status === 'completed').map((t) => t.id)
+    );
+    if (completedIds.size === 0) return;
+
+    setTasks((prev) => prev.filter((t) => t.status !== 'completed'));
+    setMarkedTaskIds((prev) => prev.filter((id) => !completedIds.has(id)));
+    if (selectedTaskId && completedIds.has(selectedTaskId)) {
+      setSelectedTaskId(null);
+    }
+    if (activeDetailTaskId && completedIds.has(activeDetailTaskId)) {
+      setActiveDetailTaskId(null);
+      setIsProgressOpen(false);
+      setIsCompleteOpen(false);
+    }
+    showToast(
+      translate(langRef.current, 'toast.clearedCompleted', { count: completedIds.size }),
+      'info'
+    );
+  };
+
   const handleDelete = () => {
     if (!selectedTaskId) return;
     const taskToDelete = tasks.find((t) => t.id === selectedTaskId);
@@ -1605,7 +1853,17 @@ export const App: React.FC = () => {
           if (plain) collected.push(...parseUrlListText(plain));
           if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
             for (const f of Array.from(e.dataTransfer.files)) {
-              if (/\.(txt|ef2|lst)$/i.test(f.name)) {
+              if (/\.torrent$/i.test(f.name)) {
+                try {
+                  const buf = await f.arrayBuffer();
+                  const res = await inspectTorrentBytes(Array.from(new Uint8Array(buf)));
+                  if (res?.url) {
+                    collected.push(res.url);
+                  }
+                } catch (err) {
+                  showToast(String(err), 'warning');
+                }
+              } else if (/\.(txt|ef2|lst)$/i.test(f.name)) {
                 const txt = await f.text();
                 collected.push(...parseUrlListText(txt));
               }
@@ -1638,7 +1896,8 @@ export const App: React.FC = () => {
         <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Top Control Toolbar */}
           <Toolbar
-            onAddUrl={() => setIsAddUrlOpen(true)}
+            onAddUrl={() => openAddDownloadEntry({ initialMode: 'url', source: 'manual' })}
+            onOpenTorrent={() => openAddDownloadEntry({ initialMode: 'torrent', source: 'manual' })}
             onOpenBatchGrabber={() => {
               setBatchInitialTab('batch');
               setIsBatchOpen(true);
@@ -1651,6 +1910,8 @@ export const App: React.FC = () => {
             onPause={() => handlePause()}
             onStopAll={handleStopAll}
             onDelete={handleDelete}
+            onClearCompleted={handleClearCompleted}
+            completedCount={categoryCounts.completed || 0}
             onOpenFolder={handleOpenFolder}
             onOpenSettings={() => {
               setSettingsInitialTab('network');
@@ -1824,6 +2085,7 @@ export const App: React.FC = () => {
         isOpen={isAddUrlOpen}
         onClose={() => {
           setIsAddUrlOpen(false);
+          setAddUrlInitialMode('url');
           setIncomingUrl(undefined);
           setIncomingMeta(undefined);
         }}
@@ -1833,6 +2095,7 @@ export const App: React.FC = () => {
         proxyConfig={proxyConfig}
         siteLogins={siteLogins}
         initialUrl={incomingUrl}
+        initialMode={addUrlInitialMode}
         incomingMeta={incomingMeta}
         defaultConnections={settings.defaultConnections}
       />

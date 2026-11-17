@@ -64,7 +64,7 @@ fn task_targets() -> &'static Mutex<HashMap<String, PathBuf>> {
 
 fn active_ui_language() -> &'static Mutex<String> {
     static LANG: OnceLock<Mutex<String>> = OnceLock::new();
-    LANG.get_or_init(|| Mutex::new("id".to_string()))
+    LANG.get_or_init(|| Mutex::new("en".to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +76,7 @@ pub struct RuntimeDownloadSettings {
     pub proxy_url: Option<String>,
     pub video_save_dir: String,
     pub music_save_dir: String,
+    pub torrents_save_dir: String,
 }
 
 impl Default for RuntimeDownloadSettings {
@@ -87,6 +88,7 @@ impl Default for RuntimeDownloadSettings {
             proxy_url: None,
             video_save_dir: "~/Downloads/Video".to_string(),
             music_save_dir: "~/Downloads/Music".to_string(),
+            torrents_save_dir: "~/Downloads/Torrents".to_string(),
         }
     }
 }
@@ -108,7 +110,27 @@ fn normalize_runtime_settings(mut s: RuntimeDownloadSettings) -> RuntimeDownload
     } else {
         s.music_save_dir.trim().to_string()
     };
+    s.torrents_save_dir = if s.torrents_save_dir.trim().is_empty() {
+        "~/Downloads/Torrents".to_string()
+    } else {
+        s.torrents_save_dir.trim().to_string()
+    };
     s
+}
+
+fn resolve_save_dir_for_category<'a>(
+    rt: &'a RuntimeDownloadSettings,
+    category: &str,
+) -> &'a str {
+    match category.trim().to_ascii_lowercase().as_str() {
+        "video" => rt.video_save_dir.as_str(),
+        "music" => rt.music_save_dir.as_str(),
+        "torrents" => rt.torrents_save_dir.as_str(),
+        "compressed" => "~/Downloads/Compressed",
+        "documents" => "~/Downloads/Documents",
+        "programs" => "~/Downloads/Programs",
+        _ => "~/Downloads",
+    }
 }
 
 fn runtime_settings_file_path() -> Option<PathBuf> {
@@ -131,12 +153,12 @@ fn save_runtime_settings_to_path(
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Gagal membuat folder pengaturan runtime: {}", e))?;
+            .map_err(|e| format!("Failed to create runtime settings directory: {}", e))?;
     }
     let json = serde_json::to_string_pretty(settings)
-        .map_err(|e| format!("Gagal serialisasi pengaturan runtime: {}", e))?;
+        .map_err(|e| format!("Failed to serialize runtime settings: {}", e))?;
     std::fs::write(path, json)
-        .map_err(|e| format!("Gagal menyimpan pengaturan runtime: {}", e))
+        .map_err(|e| format!("Failed to write runtime settings: {}", e))
 }
 
 fn runtime_settings_store() -> &'static Mutex<Option<RuntimeDownloadSettings>> {
@@ -166,7 +188,7 @@ fn sync_runtime_settings(settings: RuntimeDownloadSettings) -> RuntimeDownloadSe
     }
     if let Some(path) = runtime_settings_file_path() {
         if let Err(e) = save_runtime_settings_to_path(&path, &normalized) {
-            log::warn!("Gagal menyimpan runtime_settings.json: {}", e);
+            log::warn!("Failed to write runtime_settings.json: {}", e);
         }
     }
     normalized
@@ -218,7 +240,7 @@ fn build_info_payload(app_name: Option<String>) -> BuildInfo {
         copyright: "Copyright © 2026 Ujang Mustamar".to_string(),
         license: env!("CARGO_PKG_LICENSE").to_string(),
         repository: env!("CARGO_PKG_REPOSITORY").to_string(),
-        engine: "Download Cepat Core Engine (Rust Multi-Chunk HTTP/FTP)".to_string(),
+        engine: "Download Cepat Core Engine (Rust Multi-Chunk HTTP/FTP/Torrent)".to_string(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         build_profile: if cfg!(debug_assertions) {
@@ -244,14 +266,35 @@ struct TrayLabels {
     tooltip: &'static str,
 }
 
-fn tray_labels_for_lang(lang: &str) -> TrayLabels {
+fn normalize_tray_lang(lang: &str) -> &'static str {
     match lang.trim().to_ascii_lowercase().as_str() {
-        "en" => TrayLabels {
-            show: "Open Download Cepat",
-            add: "Add New URL...",
-            pause_all: "Pause All Downloads",
-            quit: "Quit",
-            tooltip: "Download Cepat — Click to Open",
+        "id" => "id",
+        "ms" => "ms",
+        "zh" | "zh-cn" | "zh-hans" => "zh",
+        "ja" => "ja",
+        "ko" => "ko",
+        "es" => "es",
+        "fr" => "fr",
+        "de" => "de",
+        "pt" | "pt-br" => "pt",
+        "ru" => "ru",
+        "ar" => "ar",
+        "hi" => "hi",
+        "vi" => "vi",
+        "th" => "th",
+        "tr" => "tr",
+        _ => "en",
+    }
+}
+
+fn tray_labels_for_lang(lang: &str) -> TrayLabels {
+    match normalize_tray_lang(lang) {
+        "id" => TrayLabels {
+            show: "Buka Download Cepat",
+            add: "Tambah URL Baru...",
+            pause_all: "Jeda Semua Unduhan",
+            quit: "Keluar",
+            tooltip: "Download Cepat — Klik untuk Membuka",
         },
         "ms" => TrayLabels {
             show: "Buka Download Cepat",
@@ -260,6 +303,13 @@ fn tray_labels_for_lang(lang: &str) -> TrayLabels {
             quit: "Keluar",
             tooltip: "Download Cepat — Klik untuk Membuka",
         },
+        "zh" => TrayLabels {
+            show: "打开 Download Cepat",
+            add: "添加新 URL...",
+            pause_all: "暂停全部下载",
+            quit: "退出",
+            tooltip: "Download Cepat — 点击打开",
+        },
         "ja" => TrayLabels {
             show: "Download Cepat を開く",
             add: "新しい URL を追加...",
@@ -267,12 +317,89 @@ fn tray_labels_for_lang(lang: &str) -> TrayLabels {
             quit: "終了",
             tooltip: "Download Cepat — クリックして開く",
         },
+        "ko" => TrayLabels {
+            show: "Download Cepat 열기",
+            add: "새 URL 추가...",
+            pause_all: "모든 다운로드 일시중지",
+            quit: "종료",
+            tooltip: "Download Cepat — 클릭하여 열기",
+        },
+        "es" => TrayLabels {
+            show: "Abrir Download Cepat",
+            add: "Añadir nueva URL...",
+            pause_all: "Pausar todas las descargas",
+            quit: "Salir",
+            tooltip: "Download Cepat — Haz clic para abrir",
+        },
+        "fr" => TrayLabels {
+            show: "Ouvrir Download Cepat",
+            add: "Ajouter une URL...",
+            pause_all: "Tout mettre en pause",
+            quit: "Quitter",
+            tooltip: "Download Cepat — Cliquer pour ouvrir",
+        },
+        "de" => TrayLabels {
+            show: "Download Cepat öffnen",
+            add: "Neue URL hinzufügen...",
+            pause_all: "Alle Downloads pausieren",
+            quit: "Beenden",
+            tooltip: "Download Cepat — Zum Öffnen klicken",
+        },
+        "pt" => TrayLabels {
+            show: "Abrir Download Cepat",
+            add: "Adicionar nova URL...",
+            pause_all: "Pausar todos os downloads",
+            quit: "Sair",
+            tooltip: "Download Cepat — Clique para abrir",
+        },
+        "ru" => TrayLabels {
+            show: "Открыть Download Cepat",
+            add: "Добавить URL...",
+            pause_all: "Приостановить все",
+            quit: "Выход",
+            tooltip: "Download Cepat — Нажмите, чтобы открыть",
+        },
+        "ar" => TrayLabels {
+            show: "فتح Download Cepat",
+            add: "إضافة رابط جديد...",
+            pause_all: "إيقاف جميع التنزيلات مؤقتاً",
+            quit: "إنهاء",
+            tooltip: "Download Cepat — انقر للفتح",
+        },
+        "hi" => TrayLabels {
+            show: "Download Cepat खोलें",
+            add: "नया URL जोड़ें...",
+            pause_all: "सभी डाउनलोड रोकें",
+            quit: "बाहर निकलें",
+            tooltip: "Download Cepat — खोलने के लिए क्लिक करें",
+        },
+        "vi" => TrayLabels {
+            show: "Mở Download Cepat",
+            add: "Thêm URL mới...",
+            pause_all: "Tạm dừng tất cả",
+            quit: "Thoát",
+            tooltip: "Download Cepat — Nhấp để mở",
+        },
+        "th" => TrayLabels {
+            show: "เปิด Download Cepat",
+            add: "เพิ่ม URL ใหม่...",
+            pause_all: "หยุดดาวน์โหลดทั้งหมดชั่วคราว",
+            quit: "ออก",
+            tooltip: "Download Cepat — คลิกเพื่อเปิด",
+        },
+        "tr" => TrayLabels {
+            show: "Download Cepat'ı Aç",
+            add: "Yeni URL Ekle...",
+            pause_all: "Tüm İndirmeleri Duraklat",
+            quit: "Çıkış",
+            tooltip: "Download Cepat — Açmak için tıklayın",
+        },
         _ => TrayLabels {
-            show: "Buka Download Cepat",
-            add: "Tambah URL Baru...",
-            pause_all: "Jeda Semua Unduhan",
-            quit: "Keluar",
-            tooltip: "Download Cepat — Klik untuk Membuka",
+            show: "Open Download Cepat",
+            add: "Add New URL...",
+            pause_all: "Pause All Downloads",
+            quit: "Quit",
+            tooltip: "Download Cepat — Click to Open",
         },
     }
 }
@@ -286,12 +413,7 @@ struct TrayMenuState {
 
 #[tauri::command]
 fn set_tray_language(app: tauri::AppHandle, lang: String) -> Result<(), String> {
-    let normalized = match lang.trim().to_ascii_lowercase().as_str() {
-        "en" => "en",
-        "ms" => "ms",
-        "ja" => "ja",
-        _ => "id",
-    };
+    let normalized = normalize_tray_lang(&lang);
     if let Ok(mut guard) = active_ui_language().lock() {
         *guard = normalized.to_string();
     }
@@ -340,6 +462,13 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
         }
     };
 
+    let torrent_meta = core_engine::torrent::torrent_checkpoint_path(target);
+    if target.is_dir() && torrent_meta.is_file() {
+        if std::fs::remove_dir_all(target).is_ok() {
+            removed_count += 1;
+        }
+    }
+
     let temp_streams: Vec<PathBuf> = ["temp_stream.mp4", "temp_stream.m4a"]
         .into_iter()
         .map(|ext| target.with_extension(ext))
@@ -349,6 +478,7 @@ fn cleanup_download_artifacts(target: &Path) -> usize {
     let mut direct_candidates = vec![
         target.to_path_buf(),
         core_engine::downloader::checkpoint_path_for(target),
+        torrent_meta,
         PathBuf::from(format!("{}.part", target.display())),
         PathBuf::from(format!("{}.ytdl", target.display())),
     ];
@@ -1123,6 +1253,9 @@ fn is_youtube_url(raw_url: &str) -> bool {
 }
 
 fn is_video_or_stream_url(raw_url: &str) -> bool {
+    if core_engine::torrent::is_torrent_reference(raw_url) {
+        return false;
+    }
     let lower = raw_url.trim().to_lowercase();
     let without_scheme = lower
         .split_once("://")
@@ -1791,6 +1924,7 @@ async fn inspect_video_url_uncached(
             duration_seconds: if duration_seconds > 0 { Some(duration_seconds) } else { None },
             formats: video_formats,
         }),
+        torrent_info: None,
     })
 }
 
@@ -1839,6 +1973,10 @@ pub struct DownloadTelemetryPayload {
     pub destination_path: String,
     pub segments: Vec<SegmentProgressPayload>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub peers: Option<usize>,
+    #[serde(default)]
+    pub seeds: Option<usize>,
 }
 
 fn emit_simple_telemetry(
@@ -1866,6 +2004,8 @@ fn emit_simple_telemetry(
             destination_path: target.display().to_string(),
             segments: Vec::new(),
             error,
+            peers: None,
+            seeds: None,
         },
     );
 }
@@ -1993,8 +2133,8 @@ fn normalize_platform_path(path: PathBuf) -> PathBuf {
 fn open_folder(path: String) -> Result<String, String> {
     let mut target = normalize_platform_path(resolve_path(&path));
 
-    // If target has a file extension or is a file, reveal in Finder/Explorer/File Manager or get parent directory
-    if target.is_file() || target.extension().is_some() {
+    // If target is a file (not an existing directory with a dot in its name), reveal in Finder/Explorer/File Manager or open parent directory
+    if target.is_file() || (!target.is_dir() && target.extension().is_some()) {
         if target.exists() {
             #[cfg(target_os = "macos")]
             {
@@ -2099,8 +2239,35 @@ fn open_file(path: String) -> Result<String, String> {
         .map_err(|e| format!("Gagal membuka berkas ({}): {}", target.display(), e))
 }
 
+fn dir_size_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            total = total.saturating_add(dir_size_bytes(&p));
+        } else if let Ok(meta) = entry.metadata() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    total
+}
+
+fn path_content_size(path: &Path) -> u64 {
+    if path.is_dir() {
+        dir_size_bytes(path)
+    } else {
+        std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    }
+}
+
 fn resolve_unique_destination(target: &Path) -> PathBuf {
-    if !target.exists() || core_engine::downloader::checkpoint_path_for(target).exists() {
+    if !target.exists()
+        || core_engine::downloader::checkpoint_path_for(target).exists()
+        || core_engine::torrent::torrent_checkpoint_path(target).exists()
+    {
         return target.to_path_buf();
     }
     let part_candidate = PathBuf::from(format!("{}.part", target.display()));
@@ -2717,6 +2884,8 @@ async fn download_http_stream_phase(
                             destination_path: target_str.clone(),
                             segments: Vec::new(),
                             error: None,
+                            peers: None,
+                            seeds: None,
                         },
                     );
                     break;
@@ -2736,6 +2905,8 @@ async fn download_http_stream_phase(
                             destination_path: target_str.clone(),
                             segments: segments_payload,
                             error: None,
+                            peers: None,
+                            seeds: None,
                         },
                     );
                     break;
@@ -2759,6 +2930,8 @@ async fn download_http_stream_phase(
                             destination_path: target_str.clone(),
                             segments: segments_payload,
                             error: None,
+                            peers: None,
+                            seeds: None,
                         },
                     );
                     break;
@@ -2777,6 +2950,8 @@ async fn download_http_stream_phase(
                             destination_path: target_str.clone(),
                             segments: segments_payload,
                             error: None,
+                            peers: None,
+                            seeds: None,
                         },
                     );
                 }
@@ -3623,8 +3798,9 @@ async fn start_real_download_with_controller(
             return;
         }
 
-        let is_video_or_stream = is_video_or_stream_url(&url)
-            || format_id.as_deref().map_or(false, |f| !f.trim().is_empty());
+        let is_video_or_stream = !core_engine::torrent::is_torrent_reference(&url)
+            && (is_video_or_stream_url(&url)
+                || format_id.as_deref().map_or(false, |f| !f.trim().is_empty()));
 
         if is_video_or_stream {
             // Emit initial progress immediately
@@ -4271,7 +4447,7 @@ async fn start_real_download_with_controller(
             return;
         }
 
-        // Standard HTTP / HTTPS multi-connection download (reuse http_ctrl so pre-reserved slots work seamlessly)
+        // Standard HTTP / HTTPS / FTP / BitTorrent download (reuse http_ctrl so pre-reserved slots work seamlessly)
         let controller = http_ctrl;
 
         let downloader = match core_engine::downloader::Downloader::new() {
@@ -4294,7 +4470,32 @@ async fn start_real_download_with_controller(
             }
         };
 
-        // Inspect URL to get real file size, Range support, and reject HTML hijack pages
+        // Normalize bare local .torrent file paths into cached dc-torrent:// references
+        let effective_url = {
+            let trimmed = url.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if core_engine::torrent::is_torrent_reference(trimmed)
+                && !lower.starts_with("http://")
+                && !lower.starts_with("https://")
+                && !lower.starts_with("ftp://")
+                && !lower.starts_with("magnet:")
+                && !lower.starts_with("dc-torrent://")
+                && !lower.starts_with("file://")
+            {
+                let local_p = resolve_path(trimmed);
+                if local_p.is_file() {
+                    core_engine::torrent::inspect_local_torrent_file(&local_p)
+                        .map(|(dc_ref, _)| dc_ref)
+                        .unwrap_or_else(|_| url.clone())
+                } else {
+                    url.clone()
+                }
+            } else {
+                url.clone()
+            }
+        };
+
+        // Inspect URL to get real file size, Range support, Torrent info, and reject HTML hijack pages
         let inspector = match core_engine::inspector::UrlInspector::new() {
             Ok(i) => i,
             Err(e) => {
@@ -4317,7 +4518,7 @@ async fn start_real_download_with_controller(
 
         let inspect_outcome = tokio::select! {
             res = inspector.inspect_with_options(
-                &url,
+                &effective_url,
                 core_engine::inspector::InspectOptions {
                     cookie: cookie.as_deref(),
                     referer: referer.as_deref(),
@@ -4371,27 +4572,37 @@ async fn start_real_download_with_controller(
         let supports_range = inspect_res.supports_range;
         let dl_url = inspect_res.final_url.clone();
 
-        // Emit initial progress event
-        emit_simple_telemetry(
-            &app,
-            &task_id,
-            0,
-            file_size.unwrap_or(0),
-            0,
-            1.0,
-            None,
-            "downloading",
-            &target,
-            None,
-        );
+        // Emit initial progress event only for fresh downloads (avoid 1% flicker on prebuffered resumes)
+        if !resume_mode {
+            emit_simple_telemetry(
+                &app,
+                &task_id,
+                0,
+                file_size.unwrap_or(0),
+                0,
+                1.0,
+                None,
+                "downloading",
+                &target,
+                None,
+            );
+        }
 
         let (tx, mut rx) = tokio::sync::broadcast::channel::<core_engine::model::ProgressTelemetry>(128);
 
-        // Forward telemetry to Tauri frontend (including real ETA and per-thread segments!)
+        // Forward telemetry to Tauri frontend (including real ETA, peers/seeds, and per-thread segments!)
         let app_clone = app.clone();
         let target_str = target.display().to_string();
         let monitor_handle = tokio::spawn(async move {
+            let mut last_downloaded = 0u64;
+            let mut last_total = 0u64;
             while let Ok(telem) = rx.recv().await {
+                last_downloaded = telem.downloaded_bytes;
+                if let Some(t) = telem.total_bytes {
+                    if t > 0 {
+                        last_total = t;
+                    }
+                }
                 let is_terminal = matches!(
                     telem.status,
                     core_engine::model::TaskStatus::Completed
@@ -4425,41 +4636,66 @@ async fn start_real_download_with_controller(
                         destination_path: target_str.clone(),
                         segments: segments_payload,
                         error: None,
+                        peers: telem.peers,
+                        seeds: telem.seeds,
                     },
                 );
                 if is_terminal {
                     break;
                 }
             }
+            (last_downloaded, last_total)
         });
 
         let speed_limit_bps = controller
             .speed_limit()
             .or_else(|| speed_limit_kbs.filter(|&k| k > 0).map(|k| k * 1024));
-        let download_result = downloader
-            .download_with_options(
-                &task_id,
-                &dl_url,
-                &target,
-                file_size,
-                supports_range,
-                effective_connections,
-                Some(tx),
-                Some(controller.clone()),
-                core_engine::downloader::DownloadOptions {
-                    cookie: cookie.as_deref(),
-                    referer: referer.as_deref(),
-                    user_agent: user_agent.as_deref(),
-                    speed_limit_bytes_per_sec: speed_limit_bps,
-                    proxy_url: proxy_url.as_deref(),
-                    auth_username: auth_username.as_deref(),
-                    auth_password: auth_password.as_deref(),
-                    allow_url_refresh: allow_url_refresh.unwrap_or(false),
-                },
-            )
-            .await;
+        let dl_opts = core_engine::downloader::DownloadOptions {
+            cookie: cookie.as_deref(),
+            referer: referer.as_deref(),
+            user_agent: user_agent.as_deref(),
+            speed_limit_bytes_per_sec: speed_limit_bps,
+            proxy_url: proxy_url.as_deref(),
+            auth_username: auth_username.as_deref(),
+            auth_password: auth_password.as_deref(),
+            allow_url_refresh: allow_url_refresh.unwrap_or(false),
+        };
+        let is_torrent_dl = inspect_res.torrent_info.is_some()
+            || core_engine::torrent::is_torrent_reference(&dl_url)
+            || core_engine::torrent::is_torrent_reference(&effective_url);
 
-        let _ = monitor_handle.await;
+        let download_result = if is_torrent_dl {
+            let torrent_source = if core_engine::torrent::is_torrent_reference(&dl_url) {
+                &dl_url
+            } else {
+                &effective_url
+            };
+            core_engine::torrent::download_torrent(
+                &task_id,
+                torrent_source,
+                &target,
+                Some(tx),
+                controller.clone(),
+                &dl_opts,
+            )
+            .await
+        } else {
+            downloader
+                .download_with_options(
+                    &task_id,
+                    &dl_url,
+                    &target,
+                    file_size,
+                    supports_range,
+                    effective_connections,
+                    Some(tx),
+                    Some(controller.clone()),
+                    dl_opts,
+                )
+                .await
+        };
+
+        let (last_downloaded, last_total) = monitor_handle.await.unwrap_or((0, 0));
         unregister_active_download(&task_id);
 
         if controller.is_canceled() {
@@ -4475,12 +4711,17 @@ async fn start_real_download_with_controller(
         match download_result {
             Ok(_) => {
                 remove_task_target(&task_id);
-                let file_len = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+                let disk_len = path_content_size(&target);
+                let reported_len = if disk_len > 0 {
+                    disk_len
+                } else {
+                    last_total.max(last_downloaded)
+                };
                 emit_simple_telemetry(
                     &app,
                     &task_id,
-                    file_len,
-                    file_len,
+                    reported_len,
+                    reported_len,
                     0,
                     100.0,
                     Some(0),
@@ -4528,6 +4769,24 @@ async fn inspect_url(
     auth_username: Option<String>,
     auth_password: Option<String>,
 ) -> Result<core_engine::model::InspectResult, String> {
+    let trimmed = url.trim();
+    if core_engine::torrent::is_torrent_reference(trimmed) {
+        let lower = trimmed.to_ascii_lowercase();
+        if !lower.starts_with("http://")
+            && !lower.starts_with("https://")
+            && !lower.starts_with("magnet:")
+            && !lower.starts_with("dc-torrent://")
+            && !lower.starts_with("file://")
+        {
+            let local_path = resolve_path(trimmed);
+            if local_path.is_file() {
+                return core_engine::torrent::inspect_local_torrent_file(&local_path)
+                    .map(|(_, res)| res)
+                    .map_err(|e| format!("Invalid .torrent file: {}", e));
+            }
+        }
+    }
+
     if is_video_or_stream_url(&url) {
         match inspect_video_url_with_options(
             &url,
@@ -4565,6 +4824,20 @@ async fn inspect_url(
         )
         .await
         .map_err(|e| format!("{}", e))
+}
+
+#[tauri::command]
+fn inspect_torrent_bytes(bytes: Vec<u8>) -> Result<core_engine::model::InspectResult, String> {
+    if bytes.is_empty() {
+        return Err("Empty .torrent file".to_string());
+    }
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("Torrent file exceeds 16 MiB safety limit".to_string());
+    }
+    let dc_ref = core_engine::torrent::cache_torrent_bytes(&bytes)
+        .map_err(|e| format!("Failed to cache .torrent metadata: {}", e))?;
+    core_engine::torrent::inspect_torrent_bytes(&dc_ref, &bytes)
+        .map_err(|e| format!("Invalid .torrent file: {}", e))
 }
 
 #[tauri::command]
@@ -4661,6 +4934,13 @@ fn move_file_cross_device(src: &Path, dst: &Path) -> Result<(), String> {
     if std::fs::rename(src, dst).is_ok() {
         return Ok(());
     }
+    if src.is_dir() {
+        copy_dir_recursive(src, dst)
+            .map_err(|e| format!("Gagal menyalin direktori ke lokasi baru: {}", e))?;
+        std::fs::remove_dir_all(src)
+            .map_err(|e| format!("Gagal menghapus direktori lama setelah dipindahkan: {}", e))?;
+        return Ok(());
+    }
     std::fs::copy(src, dst)
         .map_err(|e| format!("Gagal menyalin berkas ke lokasi baru: {}", e))?;
     std::fs::remove_file(src)
@@ -4687,6 +4967,12 @@ fn rename_or_move_download_paths(old_target: &Path, new_target: &Path) -> Result
     let new_meta = core_engine::downloader::checkpoint_path_for(new_target);
     if old_meta.exists() {
         move_file_cross_device(&old_meta, &new_meta)?;
+    }
+
+    let old_torrent_meta = core_engine::torrent::torrent_checkpoint_path(old_target);
+    let new_torrent_meta = core_engine::torrent::torrent_checkpoint_path(new_target);
+    if old_torrent_meta.exists() {
+        move_file_cross_device(&old_torrent_meta, &new_torrent_meta)?;
     }
 
     Ok(new_target.display().to_string())
@@ -6488,14 +6774,1713 @@ async fn read_full_http_request(stream: &mut tokio::net::TcpStream) -> Option<St
     }
 }
 
+// ============================================================================
+// IDM-Style Multi-Window Download Popups & Silent Background Pre-Download
+// ============================================================================
+
+const MAX_CONCURRENT_PREBUFFERS: usize = 3;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupPrebufferState {
+    pub status: String, // "idle" | "inspecting" | "downloading" | "paused" | "completed" | "skipped" | "error"
+    pub run_id: u64,
+    pub url: String,
+    pub file_name: Option<String>,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub speed_bytes_per_sec: u64,
+    pub progress_percent: f64,
+    pub supports_range: bool,
+    pub suggested_category: Option<String>,
+    pub mime_type: Option<String>,
+    pub eta_seconds: Option<u64>,
+    pub error: Option<String>,
+    pub torrent_info: Option<core_engine::model::TorrentInfo>,
+    pub media_info: Option<MediaInfo>,
+}
+
+impl Default for PopupPrebufferState {
+    fn default() -> Self {
+        Self {
+            status: "idle".to_string(),
+            run_id: 0,
+            url: String::new(),
+            file_name: None,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_sec: 0,
+            progress_percent: 0.0,
+            supports_range: false,
+            suggested_category: None,
+            mime_type: None,
+            eta_seconds: None,
+            error: None,
+            torrent_info: None,
+            media_info: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupPrebufferProgressPayload {
+    pub popup_id: String,
+    pub state: PopupPrebufferState,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupWindowSession {
+    pub popup_id: String,
+    pub mode: String,         // "confirm" | "mini_progress"
+    pub source: String,       // "manual" | "browser" | "tray" | "clipboard" | "drop" | "torrent"
+    pub initial_mode: String, // "url" | "torrent"
+    pub url: String,
+    pub file_name: String,
+    pub destination_path: String,
+    pub category_id: String,
+    pub num_connections: usize,
+    pub format_id: Option<String>,
+    pub resolution: Option<String>,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub file_size: Option<u64>,
+    pub mime_type: Option<String>,
+    pub proxy_url: Option<String>,
+    pub auth_username: Option<String>,
+    pub auth_password: Option<String>,
+    pub speed_limit_bytes_per_sec: Option<u64>,
+    pub task_id: Option<String>,
+    pub prebuffer: PopupPrebufferState,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenDownloadPopupParams {
+    pub source: Option<String>,
+    pub initial_mode: Option<String>,
+    pub url: Option<String>,
+    pub file_name: Option<String>,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub file_size: Option<u64>,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartPopupPreDownloadParams {
+    pub popup_id: String,
+    pub url: String,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PopupPromoteParams {
+    pub popup_id: String,
+    pub url: String,
+    pub file_name: String,
+    pub destination_path: String,
+    pub category_id: String,
+    pub num_connections: usize,
+    pub format_id: Option<String>,
+    pub resolution: Option<String>,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub proxy_url: Option<String>,
+    pub auth_username: Option<String>,
+    pub auth_password: Option<String>,
+    pub speed_limit_kbs: Option<u64>,
+    pub file_size: Option<u64>,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PopupTaskEventPayload {
+    id: String,
+    url: String,
+    file_name: String,
+    destination_path: String,
+    category_id: String,
+    file_size: Option<u64>,
+    downloaded_bytes: u64,
+    progress_percent: f64,
+    status: String,
+    supports_range: bool,
+    mime_type: Option<String>,
+    num_connections: usize,
+    speed_limit_bytes_per_sec: u64,
+    format_id: Option<String>,
+    resolution: Option<String>,
+    cookie: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    proxy_url: Option<String>,
+    auth_username: Option<String>,
+    auth_password: Option<String>,
+    source: String,
+}
+
+struct PrebufferRuntime {
+    run_id: u64,
+    url: String,
+    part_path: PathBuf,
+    controller: core_engine::DownloadController,
+    finished: Arc<std::sync::atomic::AtomicBool>,
+    finished_notify: Arc<Notify>,
+}
+
+enum PrebufferTakeOutcome {
+    None,
+    Completed {
+        part_path: PathBuf,
+        total_bytes: u64,
+    },
+    Resumable {
+        part_path: PathBuf,
+        meta_path: PathBuf,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+    },
+}
+
+fn popup_sessions() -> &'static Mutex<HashMap<String, PopupWindowSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, PopupWindowSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn popup_prebuffers() -> &'static Mutex<HashMap<String, Arc<PrebufferRuntime>>> {
+    static PREBUFFERS: OnceLock<Mutex<HashMap<String, Arc<PrebufferRuntime>>>> = OnceLock::new();
+    PREBUFFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn prebuffer_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
+    static SEM: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PREBUFFERS)))
+}
+
+fn next_generated_task_id() -> String {
+    static TASK_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = TASK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("task-{}-{}", now_ms, seq)
+}
+
+fn next_popup_id_and_stagger() -> (String, usize) {
+    static POPUP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = POPUP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let active_count = popup_sessions()
+        .lock()
+        .map(|m| m.len())
+        .unwrap_or(seq as usize);
+    (format!("dl-popup-{}", seq), active_count)
+}
+
+fn next_prebuffer_run_id() -> u64 {
+    static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn sanitize_popup_id(raw: &str) -> String {
+    let clean: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect();
+    if clean.is_empty() {
+        "popup_invalid".to_string()
+    } else {
+        clean
+    }
+}
+
+fn prebuffer_root_dir() -> PathBuf {
+    let base = user_home_dir()
+        .map(|h| h.join(".download-cepat"))
+        .unwrap_or_else(|| std::env::temp_dir().join("download-cepat"));
+    base.join("prebuffer")
+}
+
+fn prebuffer_part_path_for(popup_id: &str, run_id: u64) -> PathBuf {
+    let safe = sanitize_popup_id(popup_id);
+    prebuffer_root_dir().join(format!("{}_r{}.part", safe, run_id))
+}
+
+fn cleanup_prebuffer_files_at(part_path: &Path) -> usize {
+    let mut removed = 0usize;
+    let meta = core_engine::downloader::checkpoint_path_for(part_path);
+    if part_path.is_file() && std::fs::remove_file(part_path).is_ok() {
+        removed += 1;
+    }
+    if meta.is_file() && std::fs::remove_file(&meta).is_ok() {
+        removed += 1;
+    }
+    let ytdl = PathBuf::from(format!("{}.ytdl", part_path.display()));
+    if ytdl.is_file() && std::fs::remove_file(&ytdl).is_ok() {
+        removed += 1;
+    }
+    removed
+}
+
+fn cleanup_prebuffer_by_id_prefix_at(root: &Path, popup_id: &str) -> usize {
+    if !root.is_dir() {
+        return 0;
+    }
+    let safe = sanitize_popup_id(popup_id);
+    let prefix_run = format!("{}_", safe);
+    let prefix_dot = format!("{}.", safe);
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
+                continue;
+            };
+            if name.starts_with(&prefix_run) || name.starts_with(&prefix_dot) {
+                if p.is_file() && std::fs::remove_file(&p).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    removed
+}
+
+fn cleanup_stale_prebuffer_dir_at(root: &Path) -> usize {
+    if !root.is_dir() {
+        return 0;
+    }
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && std::fs::remove_file(&p).is_ok() {
+                removed += 1;
+            } else if p.is_dir() && std::fs::remove_dir_all(&p).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+fn cleanup_stale_prebuffer_dir() -> usize {
+    cleanup_stale_prebuffer_dir_at(&prebuffer_root_dir())
+}
+
+fn compute_popup_position(
+    work_area_x: i32,
+    work_area_y: i32,
+    work_area_w: u32,
+    work_area_h: u32,
+    scale_factor: f64,
+    win_w: f64,
+    win_h: f64,
+    stagger_index: usize,
+) -> (f64, f64) {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let area_x = (work_area_x as f64) / scale;
+    let area_y = (work_area_y as f64) / scale;
+    let area_w = ((work_area_w as f64) / scale).max(win_w);
+    let area_h = ((work_area_h as f64) / scale).max(win_h);
+
+    let step = (stagger_index % 6) as f64 * 28.0;
+    let base_x = area_x + ((area_w - win_w) * 0.5).max(0.0);
+    let base_y = area_y + ((area_h - win_h) * 0.5).max(0.0);
+
+    let max_x = area_x + (area_w - win_w).max(0.0);
+    let max_y = area_y + (area_h - win_h).max(0.0);
+
+    let x = (base_x + step).clamp(area_x, max_x);
+    let y = (base_y + step).clamp(area_y, max_y);
+    (x, y)
+}
+
+fn derive_initial_popup_meta(
+    url: &str,
+    provided_file_name: Option<&str>,
+    mime_type: Option<&str>,
+    initial_mode: &str,
+    rt: &RuntimeDownloadSettings,
+) -> (String, String, String) {
+    let trimmed = url.trim();
+    let explicit_name = provided_file_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(core_engine::inspector::sanitize_filename);
+
+    if trimmed.is_empty() {
+        let cat = if initial_mode == "torrent" {
+            "torrents".to_string()
+        } else {
+            "general".to_string()
+        };
+        let dir = resolve_save_dir_for_category(rt, &cat).to_string();
+        return (String::new(), cat, dir);
+    }
+
+    if core_engine::torrent::is_magnet_uri(trimmed) {
+        let name = explicit_name.unwrap_or_else(|| {
+            if let Ok(mag) = core_engine::torrent::parse_magnet_uri(trimmed) {
+                mag.display_name
+                    .unwrap_or_else(|| format!("torrent_{}", &mag.info_hash_hex[..12]))
+            } else {
+                "torrent_download".to_string()
+            }
+        });
+        let dest = join_save_dir_and_file(resolve_save_dir_for_category(rt, "torrents"), &name);
+        return (name, "torrents".to_string(), dest);
+    }
+
+    let is_torrent_mime = mime_type
+        .map(|m| m.to_ascii_lowercase().contains("bittorrent"))
+        .unwrap_or(false);
+    if core_engine::torrent::is_torrent_reference(trimmed) || is_torrent_mime {
+        let fallback_name = explicit_name.unwrap_or_else(|| {
+            let from_url = trimmed
+                .split(['?', '#'])
+                .next()
+                .unwrap_or(trimmed)
+                .rsplit(['/', '\\'])
+                .next()
+                .map(url_decode)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "download.torrent".to_string());
+            let clean = core_engine::inspector::sanitize_filename(&from_url);
+            clean.strip_suffix(".torrent").unwrap_or(&clean).to_string()
+        });
+        let name = if fallback_name.is_empty() {
+            "torrent_download".to_string()
+        } else {
+            fallback_name
+        };
+        let dest = join_save_dir_and_file(resolve_save_dir_for_category(rt, "torrents"), &name);
+        return (name, "torrents".to_string(), dest);
+    }
+
+    if is_video_or_stream_url(trimmed) {
+        let name = explicit_name.unwrap_or_else(|| "video_download.mp4".to_string());
+        let cat = "video".to_string();
+        let dest = join_save_dir_and_file(resolve_save_dir_for_category(rt, &cat), &name);
+        return (name, cat, dest);
+    }
+
+    let inferred_name = explicit_name.unwrap_or_else(|| {
+        let candidate = trimmed
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .rsplit(['/', '\\'])
+            .next()
+            .map(url_decode)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "download.bin".to_string());
+        core_engine::inspector::sanitize_filename(&candidate)
+    });
+    let cat = core_engine::inspector::categorize_filename(&inferred_name);
+    let dest = join_save_dir_and_file(resolve_save_dir_for_category(rt, &cat), &inferred_name);
+    (inferred_name, cat, dest)
+}
+
+async fn create_popup_webview_window(
+    app: &tauri::AppHandle,
+    popup_id: &str,
+    title: &str,
+    width: f64,
+    height: f64,
+    min_width: f64,
+    min_height: f64,
+    stagger_idx: usize,
+) -> Result<(), String> {
+    let app_clone = app.clone();
+    let label = popup_id.to_string();
+    let win_title = title.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let _ = app_clone.set_activation_policy(tauri::ActivationPolicy::Regular);
+
+        let url_str = format!("index.html?window=popup&popupId={}", label);
+        let mut builder = tauri::WebviewWindowBuilder::new(
+            &app_clone,
+            label,
+            tauri::WebviewUrl::App(PathBuf::from(url_str)),
+        )
+        .title(win_title)
+        .inner_size(width, height)
+        .min_inner_size(min_width, min_height)
+        .resizable(true)
+        .minimizable(true)
+        .maximizable(true)
+        .closable(true)
+        .decorations(true)
+        .focused(true)
+        .visible(true);
+
+        if let Ok(Some(monitor)) = app_clone.primary_monitor() {
+            let wa = monitor.work_area();
+            let scale = monitor.scale_factor();
+            let (x, y) = compute_popup_position(
+                wa.position.x,
+                wa.position.y,
+                wa.size.width,
+                wa.size.height,
+                scale,
+                width,
+                height,
+                stagger_idx,
+            );
+            builder = builder.position(x, y);
+        } else {
+            builder = builder.center();
+        }
+
+        builder
+            .build()
+            .map(|_| ())
+            .map_err(|e| format!("Failed creating popup window: {}", e))
+    })
+    .await
+    .map_err(|e| format!("Failed joining popup window task: {}", e))?
+}
+
+async fn update_popup_window_for_mini_progress(
+    app: &tauri::AppHandle,
+    popup_id: &str,
+    file_name: &str,
+) {
+    let app_clone = app.clone();
+    let label = popup_id.to_string();
+    let title = if file_name.trim().is_empty() {
+        "Downloading - Download Cepat".to_string()
+    } else {
+        format!("{} - Download Cepat", file_name.trim())
+    };
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(win) = app_clone.get_webview_window(&label) {
+            let _ = win.set_min_size(Some(tauri::LogicalSize::new(440.0, 300.0)));
+            let _ = win.set_size(tauri::LogicalSize::new(520.0, 360.0));
+            let _ = win.set_title(&title);
+            let _ = win.unminimize();
+            let _ = win.show();
+        }
+    })
+    .await;
+}
+
+async fn close_popup_window_by_label(app: &tauri::AppHandle, popup_id: &str) {
+    let app_clone = app.clone();
+    let label = popup_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(win) = app_clone.get_webview_window(&label) {
+            let _ = win.close();
+        }
+    })
+    .await;
+}
+
+fn emit_prebuffer_update(
+    app: &tauri::AppHandle,
+    popup_id: &str,
+    run_id: u64,
+    mut update_fn: impl FnMut(&mut PopupWindowSession),
+) -> bool {
+    let payload_opt: Option<PopupPrebufferProgressPayload> = {
+        let Ok(mut map) = popup_sessions().lock() else {
+            return false;
+        };
+        let Some(session) = map.get_mut(popup_id) else {
+            return false;
+        };
+        if session.mode != "confirm" || session.prebuffer.run_id != run_id {
+            return false;
+        }
+        update_fn(session);
+        Some(PopupPrebufferProgressPayload {
+            popup_id: popup_id.to_string(),
+            state: session.prebuffer.clone(),
+        })
+    };
+    if let Some(payload) = payload_opt {
+        let _ = app.emit("popup-prebuffer-progress", payload);
+        true
+    } else {
+        false
+    }
+}
+
+fn is_popup_prebuffer_run_current(popup_id: &str, run_id: u64) -> bool {
+    popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| {
+            map.get(popup_id)
+                .map(|s| s.mode == "confirm" && s.prebuffer.run_id == run_id)
+        })
+        .unwrap_or(false)
+}
+
+async fn start_popup_pre_download_internal(
+    app: &tauri::AppHandle,
+    popup_id: &str,
+    raw_url: &str,
+    cookie: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    force: bool,
+) -> Option<PopupPrebufferState> {
+    let url = raw_url.trim().to_string();
+
+    if !force && !url.is_empty() {
+        if let Ok(map) = popup_sessions().lock() {
+            if let Some(s) = map.get(popup_id) {
+                if s.mode == "confirm"
+                    && s.prebuffer.url == url
+                    && matches!(
+                        s.prebuffer.status.as_str(),
+                        "inspecting" | "downloading" | "completed" | "skipped"
+                    )
+                {
+                    return Some(s.prebuffer.clone());
+                }
+            }
+        }
+    }
+
+    // Cancel any previous in-flight prebuffer runtime for this popup
+    if let Ok(mut pre_map) = popup_prebuffers().lock() {
+        if let Some(prev) = pre_map.remove(popup_id) {
+            prev.controller.cancel();
+            cleanup_prebuffer_files_at(&prev.part_path);
+        }
+    }
+
+    let run_id = next_prebuffer_run_id();
+    let part_path = prebuffer_part_path_for(popup_id, run_id);
+
+    if url.is_empty() {
+        let state = PopupPrebufferState {
+            status: "idle".to_string(),
+            run_id,
+            url: String::new(),
+            ..Default::default()
+        };
+        if let Ok(mut map) = popup_sessions().lock() {
+            if let Some(session) = map.get_mut(popup_id) {
+                if session.mode == "confirm" {
+                    session.url = String::new();
+                    session.cookie = cookie;
+                    session.referer = referer;
+                    session.user_agent = user_agent;
+                    session.prebuffer = state.clone();
+                }
+            }
+        }
+        let _ = app.emit(
+            "popup-prebuffer-progress",
+            PopupPrebufferProgressPayload {
+                popup_id: popup_id.to_string(),
+                state: state.clone(),
+            },
+        );
+        return Some(state);
+    }
+
+    let initial_state = PopupPrebufferState {
+        status: "inspecting".to_string(),
+        run_id,
+        url: url.clone(),
+        ..Default::default()
+    };
+
+    {
+        let Ok(mut map) = popup_sessions().lock() else {
+            return None;
+        };
+        let Some(session) = map.get_mut(popup_id) else {
+            return None;
+        };
+        if session.mode != "confirm" {
+            return None;
+        }
+        session.url = url.clone();
+        if cookie.is_some() {
+            session.cookie = cookie.clone();
+        }
+        if referer.is_some() {
+            session.referer = referer.clone();
+        }
+        if user_agent.is_some() {
+            session.user_agent = user_agent.clone();
+        }
+        session.prebuffer = initial_state.clone();
+    }
+
+    let _ = app.emit(
+        "popup-prebuffer-progress",
+        PopupPrebufferProgressPayload {
+            popup_id: popup_id.to_string(),
+            state: initial_state.clone(),
+        },
+    );
+
+    let ctrl = core_engine::DownloadController::new();
+    let finished_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished_notify = Arc::new(Notify::new());
+    let runtime = Arc::new(PrebufferRuntime {
+        run_id,
+        url: url.clone(),
+        part_path: part_path.clone(),
+        controller: ctrl.clone(),
+        finished: finished_flag.clone(),
+        finished_notify: finished_notify.clone(),
+    });
+
+    if let Ok(mut pre_map) = popup_prebuffers().lock() {
+        pre_map.insert(popup_id.to_string(), runtime.clone());
+    }
+
+    let app_clone = app.clone();
+    let popup_id_own = popup_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        let mark_finished = || {
+            finished_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            finished_notify.notify_waiters();
+        };
+
+        let rt_settings = get_runtime_settings();
+        let proxy_url = rt_settings.proxy_url.clone();
+
+        // Video platform / manifest streams or explicit torrent links: inspect metadata cleanly without pre-buffering
+        if is_video_or_stream_url(&url) || core_engine::torrent::is_torrent_reference(&url) {
+            let inspect_res = tokio::select! {
+                res = inspect_url(
+                    url.clone(),
+                    cookie.clone(),
+                    referer.clone(),
+                    user_agent.clone(),
+                    proxy_url.clone(),
+                    None,
+                    None,
+                ) => Some(res),
+                _ = ctrl.notified() => None,
+            };
+
+            if ctrl.is_stopped() || !is_popup_prebuffer_run_current(&popup_id_own, run_id) {
+                cleanup_prebuffer_files_at(&part_path);
+                mark_finished();
+                return;
+            }
+
+            match inspect_res {
+                Some(Ok(res)) => {
+                    emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                        s.prebuffer.status = "skipped".to_string();
+                        s.prebuffer.file_name = Some(res.file_name.clone());
+                        s.prebuffer.total_bytes = res.file_size;
+                        s.prebuffer.supports_range = res.supports_range;
+                        s.prebuffer.suggested_category = Some(res.suggested_category.clone());
+                        s.prebuffer.mime_type = res.mime_type.clone();
+                        s.prebuffer.torrent_info = res.torrent_info.clone();
+                        s.prebuffer.media_info = res.media_info.clone();
+                        s.prebuffer.error = None;
+                        if res.file_size.is_some() {
+                            s.file_size = res.file_size;
+                        }
+                        if res.mime_type.is_some() {
+                            s.mime_type = res.mime_type.clone();
+                        }
+                    });
+                }
+                Some(Err(e)) => {
+                    emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                        s.prebuffer.status = "error".to_string();
+                        s.prebuffer.error = Some(e.clone());
+                    });
+                }
+                None => {}
+            }
+            mark_finished();
+            return;
+        }
+
+        // Standard HTTP(S) / FTP inspection
+        let inspector = match core_engine::inspector::UrlInspector::new() {
+            Ok(i) => i,
+            Err(e) => {
+                emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                    s.prebuffer.status = "error".to_string();
+                    s.prebuffer.error = Some(format!("Inspector init failed: {}", e));
+                });
+                mark_finished();
+                return;
+            }
+        };
+
+        let inspect_res = tokio::select! {
+            res = inspector.inspect_with_options(
+                &url,
+                core_engine::inspector::InspectOptions {
+                    cookie: cookie.as_deref(),
+                    referer: referer.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    proxy_url: proxy_url.as_deref(),
+                    auth_username: None,
+                    auth_password: None,
+                },
+            ) => Some(res),
+            _ = ctrl.notified() => None,
+        };
+
+        if ctrl.is_stopped() || !is_popup_prebuffer_run_current(&popup_id_own, run_id) {
+            cleanup_prebuffer_files_at(&part_path);
+            mark_finished();
+            return;
+        }
+
+        let inspected = match inspect_res {
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                    s.prebuffer.status = "error".to_string();
+                    s.prebuffer.error = Some(format!("{}", e));
+                });
+                mark_finished();
+                return;
+            }
+            None => {
+                mark_finished();
+                return;
+            }
+        };
+
+        // If the HTTP response turned out to be a .torrent metainfo file, skip prebuffering cleanly
+        if inspected.torrent_info.is_some()
+            || core_engine::torrent::is_torrent_reference(&inspected.final_url)
+        {
+            emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                s.prebuffer.status = "skipped".to_string();
+                s.prebuffer.file_name = Some(inspected.file_name.clone());
+                s.prebuffer.total_bytes = inspected.file_size;
+                s.prebuffer.supports_range = true;
+                s.prebuffer.suggested_category = Some("torrents".to_string());
+                s.prebuffer.mime_type = inspected.mime_type.clone();
+                s.prebuffer.torrent_info = inspected.torrent_info.clone();
+                s.prebuffer.error = None;
+                if inspected.file_size.is_some() {
+                    s.file_size = inspected.file_size;
+                }
+                if inspected.mime_type.is_some() {
+                    s.mime_type = inspected.mime_type.clone();
+                }
+            });
+            mark_finished();
+            return;
+        }
+
+        let file_size = inspected.file_size;
+        let supports_range = inspected.supports_range;
+        let dl_url = inspected.final_url.clone();
+
+        if !emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+            s.prebuffer.status = "downloading".to_string();
+            s.prebuffer.file_name = Some(inspected.file_name.clone());
+            s.prebuffer.total_bytes = file_size;
+            s.prebuffer.supports_range = supports_range;
+            s.prebuffer.suggested_category = Some(inspected.suggested_category.clone());
+            s.prebuffer.mime_type = inspected.mime_type.clone();
+            s.prebuffer.error = None;
+            if file_size.is_some() {
+                s.file_size = file_size;
+            }
+            if inspected.mime_type.is_some() {
+                s.mime_type = inspected.mime_type.clone();
+            }
+        }) {
+            mark_finished();
+            return;
+        }
+
+        // Acquire bounded prebuffer concurrency slot (max 3 simultaneous prebuffers)
+        let permit = tokio::select! {
+            p = prebuffer_semaphore().clone().acquire_owned() => p.ok(),
+            _ = ctrl.notified() => None,
+        };
+
+        let Some(_permit) = permit else {
+            if ctrl.is_canceled() {
+                cleanup_prebuffer_files_at(&part_path);
+            }
+            mark_finished();
+            return;
+        };
+
+        if ctrl.is_stopped() || !is_popup_prebuffer_run_current(&popup_id_own, run_id) {
+            if ctrl.is_canceled() {
+                cleanup_prebuffer_files_at(&part_path);
+            }
+            mark_finished();
+            return;
+        }
+
+        if let Some(parent) = part_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let downloader = match core_engine::downloader::Downloader::new() {
+            Ok(d) => d,
+            Err(e) => {
+                emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                    s.prebuffer.status = "error".to_string();
+                    s.prebuffer.error = Some(format!("Downloader init failed: {}", e));
+                });
+                mark_finished();
+                return;
+            }
+        };
+
+        let (tx, mut rx) =
+            tokio::sync::broadcast::channel::<core_engine::model::ProgressTelemetry>(128);
+
+        let app_monitor = app_clone.clone();
+        let popup_monitor = popup_id_own.clone();
+        let monitor_handle = tokio::spawn(async move {
+            let mut last_downloaded = 0u64;
+            let mut last_total = 0u64;
+            while let Ok(telem) = rx.recv().await {
+                last_downloaded = telem.downloaded_bytes;
+                if let Some(t) = telem.total_bytes {
+                    if t > 0 {
+                        last_total = t;
+                    }
+                }
+                let is_terminal = matches!(
+                    telem.status,
+                    core_engine::model::TaskStatus::Completed
+                        | core_engine::model::TaskStatus::Error
+                        | core_engine::model::TaskStatus::Paused
+                        | core_engine::model::TaskStatus::Canceled
+                );
+                let status_str = match telem.status {
+                    core_engine::model::TaskStatus::Paused => "paused",
+                    core_engine::model::TaskStatus::Canceled => "paused",
+                    core_engine::model::TaskStatus::Completed => "completed",
+                    core_engine::model::TaskStatus::Error => "error",
+                    _ => "downloading",
+                };
+                emit_prebuffer_update(&app_monitor, &popup_monitor, run_id, |s| {
+                    s.prebuffer.status = status_str.to_string();
+                    s.prebuffer.downloaded_bytes = telem.downloaded_bytes;
+                    if let Some(tb) = telem.total_bytes {
+                        if tb > 0 {
+                            s.prebuffer.total_bytes = Some(tb);
+                        }
+                    }
+                    s.prebuffer.speed_bytes_per_sec = telem.speed_bytes_per_sec;
+                    s.prebuffer.progress_percent = telem.progress_percent as f64;
+                    s.prebuffer.eta_seconds = telem.eta_seconds;
+                });
+                if is_terminal {
+                    break;
+                }
+            }
+            (last_downloaded, last_total)
+        });
+
+        let speed_limit_bps = (rt_settings.speed_limit_kbs > 0)
+            .then_some(rt_settings.speed_limit_kbs * 1024);
+        let pre_conns = rt_settings.default_connections.clamp(1, 32);
+
+        let dl_res = downloader
+            .download_with_options(
+                &format!("prebuf-{}", run_id),
+                &dl_url,
+                &part_path,
+                file_size,
+                supports_range,
+                pre_conns,
+                Some(tx),
+                Some(ctrl.clone()),
+                core_engine::downloader::DownloadOptions {
+                    cookie: cookie.as_deref(),
+                    referer: referer.as_deref(),
+                    user_agent: user_agent.as_deref(),
+                    speed_limit_bytes_per_sec: speed_limit_bps,
+                    proxy_url: proxy_url.as_deref(),
+                    auth_username: None,
+                    auth_password: None,
+                    allow_url_refresh: true,
+                },
+            )
+            .await;
+
+        let (last_downloaded, last_total) = monitor_handle.await.unwrap_or((0, 0));
+
+        if ctrl.is_canceled() || !is_popup_prebuffer_run_current(&popup_id_own, run_id) {
+            cleanup_prebuffer_files_at(&part_path);
+            mark_finished();
+            return;
+        }
+
+        if ctrl.is_paused() {
+            emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                s.prebuffer.status = "paused".to_string();
+                s.prebuffer.speed_bytes_per_sec = 0;
+            });
+            mark_finished();
+            return;
+        }
+
+        match dl_res {
+            Ok(_) => {
+                let disk_len = std::fs::metadata(&part_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let final_len = if disk_len > 0 {
+                    disk_len
+                } else {
+                    last_total.max(last_downloaded)
+                };
+                emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                    s.prebuffer.status = "completed".to_string();
+                    s.prebuffer.downloaded_bytes = final_len;
+                    s.prebuffer.total_bytes = Some(final_len);
+                    s.prebuffer.speed_bytes_per_sec = 0;
+                    s.prebuffer.progress_percent = 100.0;
+                    s.prebuffer.eta_seconds = Some(0);
+                    s.prebuffer.error = None;
+                });
+            }
+            Err(e) => {
+                cleanup_prebuffer_files_at(&part_path);
+                emit_prebuffer_update(&app_clone, &popup_id_own, run_id, |s| {
+                    s.prebuffer.status = "error".to_string();
+                    s.prebuffer.speed_bytes_per_sec = 0;
+                    s.prebuffer.error = Some(format!("{}", e));
+                });
+            }
+        }
+
+        mark_finished();
+    });
+
+    Some(initial_state)
+}
+
+async fn stop_and_take_prebuffer(popup_id: &str, requested_url: &str) -> PrebufferTakeOutcome {
+    let runtime_opt = popup_prebuffers()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(popup_id));
+
+    let Some(runtime) = runtime_opt else {
+        cleanup_prebuffer_by_id_prefix_at(&prebuffer_root_dir(), popup_id);
+        return PrebufferTakeOutcome::None;
+    };
+
+    if !runtime.finished.load(std::sync::atomic::Ordering::SeqCst) {
+        runtime.controller.pause();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while !runtime.finished.load(std::sync::atomic::Ordering::SeqCst) {
+            let notified = runtime.finished_notify.notified();
+            tokio::pin!(notified);
+            if runtime.finished.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                break;
+            }
+            if tokio::time::timeout(deadline - now, notified).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    let snapshot = popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(popup_id).map(|s| s.prebuffer.clone()));
+
+    let Some(prebuf) = snapshot else {
+        cleanup_prebuffer_files_at(&runtime.part_path);
+        return PrebufferTakeOutcome::None;
+    };
+
+    if prebuf.run_id != runtime.run_id
+        || runtime.url.trim() != requested_url.trim()
+        || !runtime.finished.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        cleanup_prebuffer_files_at(&runtime.part_path);
+        return PrebufferTakeOutcome::None;
+    }
+
+    let part_path = runtime.part_path.clone();
+    let meta_path = core_engine::downloader::checkpoint_path_for(&part_path);
+
+    if prebuf.status == "completed" && part_path.is_file() {
+        let total_bytes = std::fs::metadata(&part_path)
+            .map(|m| m.len())
+            .unwrap_or_else(|_| prebuf.total_bytes.unwrap_or(prebuf.downloaded_bytes));
+        return PrebufferTakeOutcome::Completed {
+            part_path,
+            total_bytes,
+        };
+    }
+
+    if prebuf.supports_range && part_path.is_file() && meta_path.is_file() {
+        return PrebufferTakeOutcome::Resumable {
+            part_path,
+            meta_path,
+            downloaded_bytes: prebuf.downloaded_bytes,
+            total_bytes: prebuf.total_bytes,
+        };
+    }
+
+    cleanup_prebuffer_files_at(&part_path);
+    PrebufferTakeOutcome::None
+}
+
+async fn cleanup_popup_on_window_destroyed(popup_id: &str) {
+    let session_opt = popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(popup_id));
+
+    let keep_main_task = session_opt
+        .as_ref()
+        .map(|s| s.mode == "mini_progress")
+        .unwrap_or(false);
+
+    if let Ok(mut pre_map) = popup_prebuffers().lock() {
+        if let Some(rt) = pre_map.remove(popup_id) {
+            rt.controller.cancel();
+            cleanup_prebuffer_files_at(&rt.part_path);
+        }
+    }
+
+    if !keep_main_task {
+        cleanup_prebuffer_by_id_prefix_at(&prebuffer_root_dir(), popup_id);
+    }
+}
+
+async fn spawn_download_popup(
+    app: &tauri::AppHandle,
+    params: OpenDownloadPopupParams,
+) -> Result<String, String> {
+    let (popup_id, stagger_idx) = next_popup_id_and_stagger();
+    let rt = get_runtime_settings();
+    let source = params
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("manual")
+        .to_string();
+    let initial_mode = params
+        .initial_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| *s == "torrent" || *s == "url")
+        .unwrap_or("url")
+        .to_string();
+    let url = params.url.as_deref().map(str::trim).unwrap_or("").to_string();
+    let (file_name, category_id, destination_path) = derive_initial_popup_meta(
+        &url,
+        params.file_name.as_deref(),
+        params.mime_type.as_deref(),
+        &initial_mode,
+        &rt,
+    );
+
+    let session = PopupWindowSession {
+        popup_id: popup_id.clone(),
+        mode: "confirm".to_string(),
+        source,
+        initial_mode: initial_mode.clone(),
+        url: url.clone(),
+        file_name: file_name.clone(),
+        destination_path,
+        category_id,
+        num_connections: rt.default_connections.clamp(1, 32),
+        format_id: None,
+        resolution: None,
+        cookie: params.cookie.clone(),
+        referer: params.referer.clone(),
+        user_agent: params.user_agent.clone(),
+        file_size: params.file_size,
+        mime_type: params.mime_type.clone(),
+        proxy_url: rt.proxy_url.clone(),
+        auth_username: None,
+        auth_password: None,
+        speed_limit_bytes_per_sec: (rt.speed_limit_kbs > 0).then_some(rt.speed_limit_kbs * 1024),
+        task_id: None,
+        prebuffer: PopupPrebufferState::default(),
+    };
+
+    if let Ok(mut map) = popup_sessions().lock() {
+        map.insert(popup_id.clone(), session);
+    }
+
+    let win_title = if !file_name.is_empty() {
+        format!("Download - {}", file_name)
+    } else if initial_mode == "torrent" {
+        "Add Torrent - Download Cepat".to_string()
+    } else {
+        "Add New Download - Download Cepat".to_string()
+    };
+
+    if let Err(e) = create_popup_webview_window(
+        app,
+        &popup_id,
+        &win_title,
+        590.0,
+        540.0,
+        480.0,
+        430.0,
+        stagger_idx,
+    )
+    .await
+    {
+        if let Ok(mut map) = popup_sessions().lock() {
+            map.remove(&popup_id);
+        }
+        return Err(e);
+    }
+
+    if !url.is_empty() {
+        let _ = start_popup_pre_download_internal(
+            app,
+            &popup_id,
+            &url,
+            params.cookie,
+            params.referer,
+            params.user_agent,
+            true,
+        )
+        .await;
+    }
+
+    Ok(popup_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_mini_progress_popup(
+    app: &tauri::AppHandle,
+    task_id: String,
+    source: String,
+    url: String,
+    file_name: String,
+    destination_path: String,
+    category_id: String,
+    num_connections: usize,
+    format_id: Option<String>,
+    resolution: Option<String>,
+    cookie: Option<String>,
+    referer: Option<String>,
+    user_agent: Option<String>,
+    proxy_url: Option<String>,
+    speed_limit_bytes_per_sec: Option<u64>,
+    is_queued: bool,
+) -> Result<String, String> {
+    let (popup_id, stagger_idx) = next_popup_id_and_stagger();
+    let session = PopupWindowSession {
+        popup_id: popup_id.clone(),
+        mode: "mini_progress".to_string(),
+        source,
+        initial_mode: "url".to_string(),
+        url,
+        file_name: file_name.clone(),
+        destination_path,
+        category_id,
+        num_connections: num_connections.clamp(1, 32),
+        format_id,
+        resolution,
+        cookie,
+        referer,
+        user_agent,
+        file_size: None,
+        mime_type: None,
+        proxy_url,
+        auth_username: None,
+        auth_password: None,
+        speed_limit_bytes_per_sec,
+        task_id: Some(task_id),
+        prebuffer: PopupPrebufferState {
+            status: if is_queued {
+                "idle".to_string()
+            } else {
+                "skipped".to_string()
+            },
+            ..Default::default()
+        },
+    };
+
+    if let Ok(mut map) = popup_sessions().lock() {
+        map.insert(popup_id.clone(), session);
+    }
+
+    let win_title = format!("{} - Download Cepat", file_name);
+    if let Err(e) = create_popup_webview_window(
+        app,
+        &popup_id,
+        &win_title,
+        520.0,
+        360.0,
+        440.0,
+        300.0,
+        stagger_idx,
+    )
+    .await
+    {
+        if let Ok(mut map) = popup_sessions().lock() {
+            map.remove(&popup_id);
+        }
+        return Err(e);
+    }
+
+    Ok(popup_id)
+}
+
+#[tauri::command]
+async fn open_download_popup(
+    app: tauri::AppHandle,
+    params: OpenDownloadPopupParams,
+) -> Result<String, String> {
+    spawn_download_popup(&app, params).await
+}
+
+#[tauri::command]
+fn get_popup_session(popup_id: String) -> Option<PopupWindowSession> {
+    popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&popup_id).cloned())
+}
+
+#[tauri::command]
+async fn start_popup_pre_download(
+    app: tauri::AppHandle,
+    params: StartPopupPreDownloadParams,
+) -> Result<Option<PopupPrebufferState>, String> {
+    Ok(start_popup_pre_download_internal(
+        &app,
+        &params.popup_id,
+        &params.url,
+        params.cookie,
+        params.referer,
+        params.user_agent,
+        params.force.unwrap_or(false),
+    )
+    .await)
+}
+
+#[tauri::command]
+async fn promote_popup_download(
+    app: tauri::AppHandle,
+    params: PopupPromoteParams,
+) -> Result<PopupWindowSession, String> {
+    let url = params.url.trim().to_string();
+    if url.is_empty() {
+        return Err("Download URL cannot be empty".to_string());
+    }
+
+    let raw_target = resolve_path(&params.destination_path);
+    let target = resolve_unique_destination(&raw_target);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let final_dest_str = target.display().to_string();
+
+    let take_outcome = stop_and_take_prebuffer(&params.popup_id, &url).await;
+    let task_id = next_generated_task_id();
+    let rt = get_runtime_settings();
+    let effective_conns = params.num_connections.clamp(1, 32);
+    let eff_speed_kbs = params
+        .speed_limit_kbs
+        .filter(|&k| k > 0)
+        .or_else(|| (rt.speed_limit_kbs > 0).then_some(rt.speed_limit_kbs));
+    let eff_speed_bps = eff_speed_kbs.unwrap_or(0) * 1024;
+    let eff_proxy = params
+        .proxy_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| rt.proxy_url.clone());
+
+    let (
+        initial_status,
+        initial_downloaded,
+        initial_total,
+        initial_progress,
+        initial_range,
+        start_resume,
+        should_spawn_download,
+    ) = match take_outcome {
+        PrebufferTakeOutcome::Completed {
+            part_path,
+            total_bytes,
+        } => {
+            if let Err(e) = move_file_cross_device(&part_path, &target) {
+                cleanup_prebuffer_files_at(&part_path);
+                return Err(e);
+            }
+            cleanup_prebuffer_files_at(&part_path);
+            let actual_len = path_content_size(&target).max(total_bytes);
+            (
+                "completed".to_string(),
+                actual_len,
+                Some(actual_len),
+                100.0,
+                true,
+                false,
+                false,
+            )
+        }
+        PrebufferTakeOutcome::Resumable {
+            part_path,
+            meta_path,
+            downloaded_bytes,
+            total_bytes,
+        } => {
+            let target_meta = core_engine::downloader::checkpoint_path_for(&target);
+            if move_file_cross_device(&part_path, &target).is_ok()
+                && move_file_cross_device(&meta_path, &target_meta).is_ok()
+            {
+                let total_est = total_bytes.or(params.file_size);
+                let pct = match total_est {
+                    Some(t) if t > 0 => ((downloaded_bytes as f64 / t as f64) * 100.0).min(99.9),
+                    _ => 0.0,
+                };
+                (
+                    "downloading".to_string(),
+                    downloaded_bytes,
+                    total_est,
+                    pct,
+                    true,
+                    true,
+                    true,
+                )
+            } else {
+                cleanup_download_artifacts(&target);
+                cleanup_prebuffer_files_at(&part_path);
+                (
+                    "downloading".to_string(),
+                    0,
+                    params.file_size,
+                    0.0,
+                    false,
+                    false,
+                    true,
+                )
+            }
+        }
+        PrebufferTakeOutcome::None => (
+            "downloading".to_string(),
+            0,
+            params.file_size,
+            0.0,
+            false,
+            false,
+            true,
+        ),
+    };
+
+    let updated_session = {
+        let Ok(mut map) = popup_sessions().lock() else {
+            return Err("Popup session store lock failed".to_string());
+        };
+        let session = map
+            .get_mut(&params.popup_id)
+            .ok_or_else(|| "Popup session not found".to_string())?;
+        session.mode = "mini_progress".to_string();
+        session.url = url.clone();
+        session.file_name = params.file_name.clone();
+        session.destination_path = final_dest_str.clone();
+        session.category_id = params.category_id.clone();
+        session.num_connections = effective_conns;
+        session.format_id = params.format_id.clone();
+        session.resolution = params.resolution.clone();
+        session.cookie = params.cookie.clone();
+        session.referer = params.referer.clone();
+        session.user_agent = params.user_agent.clone();
+        session.proxy_url = eff_proxy.clone();
+        session.auth_username = params.auth_username.clone();
+        session.auth_password = params.auth_password.clone();
+        session.speed_limit_bytes_per_sec = (eff_speed_bps > 0).then_some(eff_speed_bps);
+        session.file_size = initial_total;
+        session.mime_type = params.mime_type.clone().or_else(|| session.mime_type.clone());
+        session.task_id = Some(task_id.clone());
+        if !should_spawn_download {
+            session.prebuffer.status = "completed".to_string();
+            session.prebuffer.downloaded_bytes = initial_downloaded;
+            session.prebuffer.total_bytes = initial_total;
+            session.prebuffer.progress_percent = 100.0;
+            session.prebuffer.speed_bytes_per_sec = 0;
+        }
+        session.clone()
+    };
+
+    update_popup_window_for_mini_progress(&app, &params.popup_id, &params.file_name).await;
+
+    let _ = app.emit(
+        "popup-download-started",
+        PopupTaskEventPayload {
+            id: task_id.clone(),
+            url: url.clone(),
+            file_name: params.file_name.clone(),
+            destination_path: final_dest_str.clone(),
+            category_id: params.category_id.clone(),
+            file_size: initial_total,
+            downloaded_bytes: initial_downloaded,
+            progress_percent: initial_progress,
+            status: initial_status.clone(),
+            supports_range: initial_range,
+            mime_type: updated_session.mime_type.clone(),
+            num_connections: effective_conns,
+            speed_limit_bytes_per_sec: eff_speed_bps,
+            format_id: params.format_id.clone(),
+            resolution: params.resolution.clone(),
+            cookie: params.cookie.clone(),
+            referer: params.referer.clone(),
+            user_agent: params.user_agent.clone(),
+            proxy_url: eff_proxy.clone(),
+            auth_username: params.auth_username.clone(),
+            auth_password: params.auth_password.clone(),
+            source: updated_session.source.clone(),
+        },
+    );
+
+    if should_spawn_download {
+        start_real_download_with_controller(
+            app,
+            task_id,
+            url,
+            final_dest_str,
+            effective_conns,
+            params.format_id,
+            params.cookie,
+            params.referer,
+            params.user_agent,
+            eff_speed_kbs,
+            Some(start_resume),
+            eff_proxy,
+            params.auth_username,
+            params.auth_password,
+            Some(true),
+            None,
+        )
+        .await?;
+    } else {
+        emit_simple_telemetry(
+            &app,
+            &task_id,
+            initial_downloaded,
+            initial_total.unwrap_or(initial_downloaded),
+            0,
+            100.0,
+            Some(0),
+            "completed",
+            &target,
+            None,
+        );
+    }
+
+    Ok(updated_session)
+}
+
+#[tauri::command]
+async fn queue_popup_later(
+    app: tauri::AppHandle,
+    params: PopupPromoteParams,
+) -> Result<(), String> {
+    let url = params.url.trim().to_string();
+    if url.is_empty() {
+        return Err("Download URL cannot be empty".to_string());
+    }
+
+    let raw_target = resolve_path(&params.destination_path);
+    let target = resolve_unique_destination(&raw_target);
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let final_dest_str = target.display().to_string();
+
+    let take_outcome = stop_and_take_prebuffer(&params.popup_id, &url).await;
+    let task_id = next_generated_task_id();
+    let rt = get_runtime_settings();
+    let effective_conns = params.num_connections.clamp(1, 32);
+    let eff_speed_bps = params
+        .speed_limit_kbs
+        .filter(|&k| k > 0)
+        .unwrap_or(rt.speed_limit_kbs)
+        * 1024;
+    let eff_proxy = params
+        .proxy_url
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| rt.proxy_url.clone());
+
+    let (status, downloaded_bytes, total_bytes, progress_percent, supports_range) =
+        match take_outcome {
+            PrebufferTakeOutcome::Completed {
+                part_path,
+                total_bytes,
+            } => {
+                if let Err(e) = move_file_cross_device(&part_path, &target) {
+                    cleanup_prebuffer_files_at(&part_path);
+                    return Err(e);
+                }
+                cleanup_prebuffer_files_at(&part_path);
+                let actual_len = path_content_size(&target).max(total_bytes);
+                ("completed".to_string(), actual_len, Some(actual_len), 100.0, true)
+            }
+            PrebufferTakeOutcome::Resumable {
+                part_path,
+                meta_path,
+                downloaded_bytes,
+                total_bytes,
+            } => {
+                let target_meta = core_engine::downloader::checkpoint_path_for(&target);
+                if move_file_cross_device(&part_path, &target).is_ok()
+                    && move_file_cross_device(&meta_path, &target_meta).is_ok()
+                {
+                    let total_est = total_bytes.or(params.file_size);
+                    let pct = match total_est {
+                        Some(t) if t > 0 => ((downloaded_bytes as f64 / t as f64) * 100.0).min(99.9),
+                        _ => 0.0,
+                    };
+                    ("paused".to_string(), downloaded_bytes, total_est, pct, true)
+                } else {
+                    cleanup_download_artifacts(&target);
+                    cleanup_prebuffer_files_at(&part_path);
+                    ("paused".to_string(), 0, params.file_size, 0.0, false)
+                }
+            }
+            PrebufferTakeOutcome::None => ("paused".to_string(), 0, params.file_size, 0.0, false),
+        };
+
+    let source = popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&params.popup_id))
+        .map(|s| s.source)
+        .unwrap_or_else(|| "manual".to_string());
+
+    let _ = app.emit(
+        "popup-download-queued",
+        PopupTaskEventPayload {
+            id: task_id,
+            url,
+            file_name: params.file_name,
+            destination_path: final_dest_str,
+            category_id: params.category_id,
+            file_size: total_bytes,
+            downloaded_bytes,
+            progress_percent,
+            status,
+            supports_range,
+            mime_type: params.mime_type,
+            num_connections: effective_conns,
+            speed_limit_bytes_per_sec: eff_speed_bps,
+            format_id: params.format_id,
+            resolution: params.resolution,
+            cookie: params.cookie,
+            referer: params.referer,
+            user_agent: params.user_agent,
+            proxy_url: eff_proxy,
+            auth_username: params.auth_username,
+            auth_password: params.auth_password,
+            source,
+        },
+    );
+
+    close_popup_window_by_label(&app, &params.popup_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn cancel_popup_download(app: tauri::AppHandle, popup_id: String) -> Result<bool, String> {
+    let session_opt = popup_sessions()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&popup_id));
+
+    if let Ok(mut pre_map) = popup_prebuffers().lock() {
+        if let Some(rt) = pre_map.remove(&popup_id) {
+            rt.controller.cancel();
+            cleanup_prebuffer_files_at(&rt.part_path);
+        }
+    }
+    cleanup_prebuffer_by_id_prefix_at(&prebuffer_root_dir(), &popup_id);
+
+    if let Some(session) = session_opt {
+        if let Some(task_id) = session.task_id {
+            let _ = cancel_real_download(task_id.clone(), Some(session.destination_path.clone())).await;
+            let target = resolve_path(&session.destination_path);
+            emit_simple_telemetry(&app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None);
+        }
+    }
+
+    close_popup_window_by_label(&app, &popup_id).await;
+    Ok(true)
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    show_main_window(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn minimize_popup_window(app: tauri::AppHandle, popup_id: String) -> Result<(), String> {
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(win) = app_clone.get_webview_window(&popup_id) {
+            let _ = win.minimize();
+        }
+    })
+    .await
+    .map_err(|e| format!("Failed minimizing popup window: {}", e))
+}
+
+#[tauri::command]
+async fn close_popup_window(app: tauri::AppHandle, popup_id: String) -> Result<(), String> {
+    close_popup_window_by_label(&app, &popup_id).await;
+    Ok(())
+}
+
 fn parse_bridge_add_links_payload(body: &str) -> Option<serde_json::Value> {
     let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
     let raw_links = v["links"].as_array()?;
     let mut cleaned: Vec<serde_json::Value> = Vec::new();
+    let is_supported_link = |s: &str| {
+        let lower = s.to_ascii_lowercase();
+        lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("ftp://")
+            || lower.starts_with("magnet:")
+    };
     for item in raw_links {
         if let Some(u) = item.as_str() {
             let trimmed = u.trim();
-            if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("ftp://") {
+            if is_supported_link(trimmed) {
                 cleaned.push(serde_json::json!({
                     "url": trimmed,
                     "label": "",
@@ -6503,7 +8488,7 @@ fn parse_bridge_add_links_payload(body: &str) -> Option<serde_json::Value> {
             }
         } else if let Some(u) = item["url"].as_str() {
             let trimmed = u.trim();
-            if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("ftp://") {
+            if is_supported_link(trimmed) {
                 cleaned.push(serde_json::json!({
                     "url": trimmed,
                     "label": item["label"].as_str().unwrap_or(""),
@@ -6554,7 +8539,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                         let current_lang = active_ui_language()
                             .lock()
                             .map(|g| g.clone())
-                            .unwrap_or_else(|_| "id".to_string());
+                            .unwrap_or_else(|_| "en".to_string());
                         let resp_body = serde_json::json!({
                             "status": "ok",
                             "app": "Download Cepat",
@@ -6584,7 +8569,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                 let resp_body = serde_json::json!({
                                     "status": "ok",
                                     "count": count,
-                                    "message": "Daftar link berhasil dikirim ke Download Cepat"
+                                    "message": "Links sent to Download Cepat"
                                 })
                                 .to_string();
                                 let resp = format!(
@@ -6621,7 +8606,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                             }
                         }
 
-                        let mut inspect_err_msg = "Stream video tidak dapat dianalisis.".to_string();
+                        let mut inspect_err_msg = "Video stream cannot be inspected.".to_string();
                         if !target_url.is_empty() {
                             let rt = get_runtime_settings();
                             match inspect_video_url_with_options(
@@ -6643,7 +8628,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                                 "resolution": f.resolution,
                                                 "extension": f.extension,
                                                 "fileSizeApprox": f.file_size_approx,
-                                                "sizeLabel": f.file_size_approx.map(format_bytes_label).unwrap_or_else(|| "Ukuran dinamis".to_string()),
+                                                "sizeLabel": f.file_size_approx.map(format_bytes_label).unwrap_or_else(|| "Dynamic size".to_string()),
                                                 "isAudioOnly": f.is_audio_only
                                             })
                                         }).collect()
@@ -6685,7 +8670,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                         return;
                     }
 
-                    // 3. ROUTE: POST /start_download (Silent background start from Browser Dropdown)
+                    // 3. ROUTE: POST /start_download (Silent background start from Browser Dropdown + Mini Progress Popup)
                     if req.starts_with("POST /start_download") {
                         if let Some(body_idx) = req.find("\r\n\r\n") {
                             let body = &req[body_idx + 4..];
@@ -6720,12 +8705,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                 let ua_opt = v["userAgent"].as_str().filter(|s| !s.trim().is_empty()).map(String::from);
 
                                 let clean_title = sanitize_media_title(&raw_title, "Video");
-
-                                static EXT_TASK_SEQ: std::sync::atomic::AtomicU64 =
-                                    std::sync::atomic::AtomicU64::new(0);
-                                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-                                let seq = EXT_TASK_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                let task_id = format!("task-{}-{}", now_ms, seq);
+                                let task_id = next_generated_task_id();
                                 let file_name = format!("{}.{}", clean_title, clean_ext);
                                 let cat_id = if is_audio { "music" } else { "video" };
                                 let dest_dir = if is_audio {
@@ -6751,7 +8731,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                 };
                                 let speed_limit_bps = rt.speed_limit_kbs * 1024;
 
-                                // Emit to frontend so the task is displayed in the active list
+                                // Emit to main window so the task is listed cleanly in background
                                 let _ = app_handle.emit("external-task-added", serde_json::json!({
                                     "id": task_id.clone(),
                                     "url": url.clone(),
@@ -6768,6 +8748,45 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                                     "proxyUrl": rt.proxy_url.clone(),
                                     "speedLimitBytesPerSec": speed_limit_bps,
                                 }));
+
+                                // Spawn separate minimizable IDM-style Mini Progress popup without waking main window
+                                let app_for_popup = app_handle.clone();
+                                let tid_for_popup = task_id.clone();
+                                let u_for_popup = url.clone();
+                                let fn_for_popup = file_name.clone();
+                                let dest_for_popup = dest_path.clone();
+                                let cat_for_popup = cat_id.to_string();
+                                let fmt_for_popup = Some(format_id.clone());
+                                let res_for_popup = Some(resolution.clone());
+                                let ck_for_popup = cookie_opt.clone();
+                                let rf_for_popup = referer_opt.clone();
+                                let ua_for_popup = ua_opt.clone();
+                                let px_for_popup = rt.proxy_url.clone();
+                                let sp_for_popup = (speed_limit_bps > 0).then_some(speed_limit_bps);
+                                tauri::async_runtime::spawn(async move {
+                                    if let Err(err) = spawn_mini_progress_popup(
+                                        &app_for_popup,
+                                        tid_for_popup,
+                                        "browser".to_string(),
+                                        u_for_popup,
+                                        fn_for_popup,
+                                        dest_for_popup,
+                                        cat_for_popup,
+                                        conn_count,
+                                        fmt_for_popup,
+                                        res_for_popup,
+                                        ck_for_popup,
+                                        rf_for_popup,
+                                        ua_for_popup,
+                                        px_for_popup,
+                                        sp_for_popup,
+                                        is_queued,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!("Failed spawning mini progress popup: {}", err);
+                                    }
+                                });
 
                                 // Spawn real background download immediately when an active slot was reserved
                                 if !is_queued {
@@ -6804,7 +8823,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
 
                                 let resp_body = serde_json::json!({
                                     "status": "ok",
-                                    "message": "Unduhan berhasil dimulai di latar belakang",
+                                    "message": "Download started in background",
                                     "taskId": task_id,
                                     "fileName": file_name,
                                     "destinationPath": dest_path,
@@ -6823,7 +8842,7 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                         }
                     }
 
-                    // 4. ROUTE: POST /add_download or GET /add_download?url=... (Interactive modal popup)
+                    // 4. ROUTE: POST /add_download or GET /add_download?url=... (IDM-style Confirm Popup + Silent Pre-Download)
                     let mut found_url = String::new();
                     let mut found_filename = String::new();
                     let mut found_cookie: Option<String> = None;
@@ -6861,19 +8880,35 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
                     }
 
                     if !found_url.is_empty() {
-                        let _ = app_handle.emit("browser-add-download", serde_json::json!({
-                            "url": found_url,
-                            "fileName": found_filename,
-                            "cookie": found_cookie,
-                            "referer": found_referer,
-                            "userAgent": found_user_agent,
-                            "fileSize": found_file_size,
-                            "mimeType": found_mime_type
-                        }));
+                        let popup_params = OpenDownloadPopupParams {
+                            source: Some("browser".to_string()),
+                            initial_mode: Some("url".to_string()),
+                            url: Some(found_url.clone()),
+                            file_name: (!found_filename.trim().is_empty()).then(|| found_filename.clone()),
+                            cookie: found_cookie.clone(),
+                            referer: found_referer.clone(),
+                            user_agent: found_user_agent.clone(),
+                            file_size: found_file_size,
+                            mime_type: found_mime_type.clone(),
+                        };
+                        let app_for_popup = app_handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) = spawn_download_popup(&app_for_popup, popup_params).await {
+                                log::warn!("Failed spawning browser confirm popup ({}); falling back to main modal", err);
+                                let _ = app_for_popup.emit("browser-add-download", serde_json::json!({
+                                    "url": found_url,
+                                    "fileName": found_filename,
+                                    "cookie": found_cookie,
+                                    "referer": found_referer,
+                                    "userAgent": found_user_agent,
+                                    "fileSize": found_file_size,
+                                    "mimeType": found_mime_type
+                                }));
+                                show_main_window(&app_for_popup);
+                            }
+                        });
 
-                        show_main_window(&app_handle);
-
-                        let body = "{\"status\":\"ok\",\"message\":\"Unduhan berhasil diterima oleh Download Cepat\"}";
+                        let body = "{\"status\":\"ok\",\"message\":\"Download received by Download Cepat\"}";
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -6942,6 +8977,7 @@ pub fn run() {
             stop_all_real_downloads,
             ensure_file_created,
             inspect_url,
+            inspect_torrent_bytes,
             update_download_speed_limit,
             verify_file_checksum,
             check_disk_space,
@@ -6959,7 +8995,16 @@ pub fn run() {
             set_tray_language,
             sync_runtime_settings,
             check_for_app_update,
-            download_and_install_app_update
+            download_and_install_app_update,
+            open_download_popup,
+            get_popup_session,
+            start_popup_pre_download,
+            promote_popup_download,
+            queue_popup_later,
+            cancel_popup_download,
+            open_main_window,
+            minimize_popup_window,
+            close_popup_window
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -6970,7 +9015,9 @@ pub fn run() {
                 )?;
             }
 
-            let initial_labels = tray_labels_for_lang("id");
+            let _ = cleanup_stale_prebuffer_dir();
+
+            let initial_labels = tray_labels_for_lang("en");
             if let Ok((tray_menu, tray_state)) = (|| -> Result<(tauri::menu::Menu<tauri::Wry>, TrayMenuState), tauri::Error> {
                 let show_item = tauri::menu::MenuItemBuilder::with_id("tray_show", initial_labels.show).build(app)?;
                 let add_item = tauri::menu::MenuItemBuilder::with_id("tray_add", initial_labels.add).build(app)?;
@@ -7001,8 +9048,24 @@ pub fn run() {
                             show_main_window(app_handle);
                         }
                         "tray_add" => {
-                            show_main_window(app_handle);
-                            let _ = app_handle.emit("tray-add-url", ());
+                            let handle_for_popup = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let params = OpenDownloadPopupParams {
+                                    source: Some("tray".to_string()),
+                                    initial_mode: Some("url".to_string()),
+                                    url: None,
+                                    file_name: None,
+                                    cookie: None,
+                                    referer: None,
+                                    user_agent: None,
+                                    file_size: None,
+                                    mime_type: None,
+                                };
+                                if spawn_download_popup(&handle_for_popup, params).await.is_err() {
+                                    show_main_window(&handle_for_popup);
+                                    let _ = handle_for_popup.emit("tray-add-url", ());
+                                }
+                            });
                         }
                         "tray_pause_all" => {
                             let controls: Vec<ActiveControl> = active_downloads()
@@ -7091,13 +9154,22 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 if should_hide_on_close(window.label()) {
                     api.prevent_close();
                     hide_main_window_to_tray(window);
                 }
             }
+            tauri::WindowEvent::Destroyed => {
+                let label = window.label().to_string();
+                if label.starts_with("dl-popup-") {
+                    tauri::async_runtime::spawn(async move {
+                        cleanup_popup_on_window_destroyed(&label).await;
+                    });
+                }
+            }
+            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -7272,6 +9344,27 @@ mod tests {
         assert_eq!(std::fs::read(&new_file).unwrap(), b"hello-dc-archive");
         assert!(new_meta.exists());
 
+        // Also verify multi-file torrent directory + .dctmeta move
+        let old_torrent_dir = test_dir.join("Ubuntu-ISO");
+        let new_torrent_dir = test_dir.join("moved").join("Ubuntu-ISO-Renamed");
+        let old_tmeta = core_engine::torrent::torrent_checkpoint_path(&old_torrent_dir);
+        let new_tmeta = core_engine::torrent::torrent_checkpoint_path(&new_torrent_dir);
+        std::fs::create_dir_all(old_torrent_dir.join("nested")).expect("create torrent dir");
+        std::fs::write(old_torrent_dir.join("nested").join("ubuntu.iso"), b"iso-data")
+            .expect("write torrent payload");
+        std::fs::write(&old_tmeta, b"{\"downloaded_pieces\":[]}").expect("write torrent meta");
+
+        let moved_t =
+            rename_or_move_download_paths(&old_torrent_dir, &new_torrent_dir).expect("move dir");
+        assert_eq!(moved_t, new_torrent_dir.display().to_string());
+        assert!(!old_torrent_dir.exists());
+        assert!(!old_tmeta.exists());
+        assert_eq!(
+            std::fs::read(new_torrent_dir.join("nested").join("ubuntu.iso")).unwrap(),
+            b"iso-data"
+        );
+        assert!(new_tmeta.exists());
+
         let _ = std::fs::remove_dir_all(&test_dir);
     }
 
@@ -7298,13 +9391,14 @@ mod tests {
         assert!(free > 0);
 
         let parsed = parse_bridge_add_links_payload(
-            r#"{"pageUrl":"https://example.com","links":["https://example.com/a.zip",{"url":"ftp://files.example.com/b.iso","label":"ISO"},"javascript:void(0)"]}"#,
+            r#"{"pageUrl":"https://example.com","links":["https://example.com/a.zip",{"url":"ftp://files.example.com/b.iso","label":"ISO"},"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Sample","javascript:void(0)"]}"#,
         )
         .expect("parse links payload");
         let arr = parsed["links"].as_array().unwrap();
-        assert_eq!(arr.len(), 2);
+        assert_eq!(arr.len(), 3);
         assert_eq!(arr[0]["url"].as_str().unwrap(), "https://example.com/a.zip");
         assert_eq!(arr[1]["url"].as_str().unwrap(), "ftp://files.example.com/b.iso");
+        assert!(arr[2]["url"].as_str().unwrap().starts_with("magnet:?xt=urn:btih:"));
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
@@ -7452,14 +9546,28 @@ mod tests {
         assert_eq!(en.show, "Open Download Cepat");
         assert_eq!(en.quit, "Quit");
 
-        let ja = tray_labels_for_lang("ja");
-        assert_eq!(ja.show, "Download Cepat を開く");
+        let fallback = tray_labels_for_lang("xx-unknown");
+        assert_eq!(fallback.show, en.show);
+        assert_eq!(fallback.quit, en.quit);
 
-        let ms = tray_labels_for_lang("ms");
-        assert_eq!(ms.pause_all, "Jeda Semua Muat Turun");
+        let all_langs = [
+            "en", "id", "ms", "zh", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "hi", "vi",
+            "th", "tr",
+        ];
+        for code in all_langs {
+            assert_eq!(normalize_tray_lang(code), code);
+            let lbl = tray_labels_for_lang(code);
+            assert!(!lbl.show.is_empty());
+            assert!(!lbl.add.is_empty());
+            assert!(!lbl.pause_all.is_empty());
+            assert!(!lbl.quit.is_empty());
+            assert!(!lbl.tooltip.is_empty());
+        }
 
-        let id = tray_labels_for_lang("id");
-        assert_eq!(id.quit, "Keluar");
+        assert_eq!(tray_labels_for_lang("ja").show, "Download Cepat を開く");
+        assert_eq!(tray_labels_for_lang("ms").pause_all, "Jeda Semua Muat Turun");
+        assert_eq!(tray_labels_for_lang("id").quit, "Keluar");
+        assert_eq!(tray_labels_for_lang("ar").quit, "إنهاء");
     }
 
     #[test]
@@ -7507,6 +9615,11 @@ mod tests {
         assert!(def.proxy_url.is_none());
         assert_eq!(def.video_save_dir, "~/Downloads/Video");
         assert_eq!(def.music_save_dir, "~/Downloads/Music");
+        assert_eq!(def.torrents_save_dir, "~/Downloads/Torrents");
+        assert_eq!(resolve_save_dir_for_category(&def, "torrents"), "~/Downloads/Torrents");
+        assert_eq!(resolve_save_dir_for_category(&def, "video"), "~/Downloads/Video");
+        assert_eq!(resolve_save_dir_for_category(&def, "music"), "~/Downloads/Music");
+        assert_eq!(resolve_save_dir_for_category(&def, "general"), "~/Downloads");
 
         let clamped = normalize_runtime_settings(RuntimeDownloadSettings {
             default_connections: 99,
@@ -7515,12 +9628,14 @@ mod tests {
             proxy_url: Some("  socks5://127.0.0.1:1080  ".to_string()),
             video_save_dir: "   ".to_string(),
             music_save_dir: r"D:\Musik\".to_string(),
+            torrents_save_dir: "   ".to_string(),
         });
         assert_eq!(clamped.default_connections, 32);
         assert_eq!(clamped.max_tasks, 1);
         assert_eq!(clamped.proxy_url.as_deref(), Some("socks5://127.0.0.1:1080"));
         assert_eq!(clamped.video_save_dir, "~/Downloads/Video");
         assert_eq!(clamped.music_save_dir, r"D:\Musik\");
+        assert_eq!(clamped.torrents_save_dir, "~/Downloads/Torrents");
 
         let test_dir = std::env::temp_dir().join(format!("dc_rt_settings_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&test_dir);
@@ -7532,6 +9647,7 @@ mod tests {
             proxy_url: None,
             video_save_dir: r"E:\Videos\".to_string(),
             music_save_dir: "~/Downloads/Music".to_string(),
+            torrents_save_dir: r"F:\Torrents\".to_string(),
         });
         save_runtime_settings_to_path(&file, &saved_cfg).expect("save runtime settings");
         let reloaded = load_runtime_settings_from_path(&file);
@@ -7630,5 +9746,60 @@ mod tests {
             None,
         );
         assert_eq!(gen_cookie, Some("SESSION=abc"));
+    }
+
+    #[test]
+    fn test_popup_positioning_and_prebuffer_cleanup() {
+        assert!(should_hide_on_close("main"));
+        assert!(!should_hide_on_close("dl-popup-1"));
+        assert!(!should_hide_on_close("dl-popup-42"));
+
+        assert_eq!(sanitize_popup_id("dl-popup-12"), "dl-popup-12");
+        assert_eq!(sanitize_popup_id("../evil/popup"), "evilpopup");
+        assert_eq!(sanitize_popup_id("   "), "popup_invalid");
+
+        // Primary 1920x1080 display at 1x scale
+        let (x0, y0) = compute_popup_position(0, 0, 1920, 1080, 1.0, 590.0, 540.0, 0);
+        let (x1, y1) = compute_popup_position(0, 0, 1920, 1080, 1.0, 590.0, 540.0, 1);
+        assert_eq!((x0, y0), (665.0, 270.0));
+        assert_eq!((x1, y1), (693.0, 298.0));
+
+        // HiDPI 2x scale clamped strictly inside work area
+        let (hx, hy) = compute_popup_position(0, 50, 2560, 1440, 2.0, 590.0, 540.0, 5);
+        assert!(hx >= 0.0 && hx <= 1280.0 - 590.0);
+        assert!(hy >= 25.0 && hy <= 25.0 + 720.0 - 540.0);
+
+        // Zero scale safely defaults to 1.0
+        let (zx, zy) = compute_popup_position(0, 0, 800, 600, 0.0, 590.0, 540.0, 20);
+        assert!(zx >= 0.0 && zy >= 0.0);
+
+        // Prebuffer cleanup helpers
+        let pre_dir = std::env::temp_dir().join(format!("dc_prebuf_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&pre_dir);
+        std::fs::create_dir_all(&pre_dir).expect("create prebuf dir");
+
+        let p1 = pre_dir.join("dl-popup-7_r1.part");
+        let p1_meta = core_engine::downloader::checkpoint_path_for(&p1);
+        let p1_r2 = pre_dir.join("dl-popup-7_r2.part");
+        let p_other = pre_dir.join("dl-popup-8_r1.part");
+        std::fs::write(&p1, b"part1").unwrap();
+        std::fs::write(&p1_meta, b"{}").unwrap();
+        std::fs::write(&p1_r2, b"part2").unwrap();
+        std::fs::write(&p_other, b"other").unwrap();
+
+        assert_eq!(cleanup_prebuffer_files_at(&p1), 2);
+        assert!(!p1.exists());
+        assert!(!p1_meta.exists());
+        assert!(p1_r2.exists());
+        assert!(p_other.exists());
+
+        assert_eq!(cleanup_prebuffer_by_id_prefix_at(&pre_dir, "dl-popup-7"), 1);
+        assert!(!p1_r2.exists());
+        assert!(p_other.exists());
+
+        assert_eq!(cleanup_stale_prebuffer_dir_at(&pre_dir), 1);
+        assert!(!p_other.exists());
+
+        let _ = std::fs::remove_dir_all(&pre_dir);
     }
 }

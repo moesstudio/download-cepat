@@ -11,6 +11,7 @@ fn test_categorize_filename() {
     assert_eq!(categorize_filename("setup.exe"), "programs");
     assert_eq!(categorize_filename("installer.dmg"), "programs");
     assert_eq!(categorize_filename("document.pdf"), "documents");
+    assert_eq!(categorize_filename("ubuntu.torrent"), "torrents");
     assert_eq!(categorize_filename("random_unknown.xyz"), "general");
 }
 
@@ -20,8 +21,9 @@ fn test_storage_lifecycle() {
 
     // 1. Verify default categories are seeded
     let categories = storage.get_categories().expect("Should read categories");
-    assert_eq!(categories.len(), 6);
+    assert_eq!(categories.len(), 7);
     assert!(categories.iter().any(|c| c.id == "compressed"));
+    assert!(categories.iter().any(|c| c.id == "torrents"));
 
     // 2. Insert task
     let task = DownloadTask {

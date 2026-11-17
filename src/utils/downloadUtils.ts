@@ -37,6 +37,12 @@ export const DEFAULT_CATEGORY_RULES: CategoryRule[] = [
     extensions: ['mp4', 'mkv', 'webm', 'avi', 'mov', 'flv', 'wmv', 'm4v', 'm3u8', 'ts'],
     saveDir: '~/Downloads/Video',
   },
+  {
+    id: 'torrents',
+    name: 'Torrents',
+    extensions: ['torrent'],
+    saveDir: '~/Downloads/Torrents',
+  },
 ];
 
 export const DEFAULT_CLIPBOARD_EXTENSIONS = [
@@ -44,6 +50,7 @@ export const DEFAULT_CLIPBOARD_EXTENSIONS = [
   'exe', 'dmg', 'pkg', 'msi', 'apk',
   'mp4', 'mkv', 'webm', 'mp3', 'm4a', 'flac',
   'pdf', 'docx', 'xlsx',
+  'torrent',
 ];
 
 export const DEFAULT_PROXY_CONFIG: ProxyConfig = {
@@ -68,6 +75,19 @@ export const DEFAULT_CLIPBOARD_CONFIG: ClipboardMonitorConfig = {
   extensions: DEFAULT_CLIPBOARD_EXTENSIONS,
 };
 
+export const isMagnetUri = (rawUrl: string): boolean => {
+  return rawUrl.trim().toLowerCase().startsWith('magnet:');
+};
+
+export const isTorrentReference = (rawUrl: string): boolean => {
+  const s = rawUrl.trim().toLowerCase();
+  if (!s) return false;
+  if (s.startsWith('magnet:') || s.startsWith('dc-torrent://')) return true;
+  const withoutHash = s.split('#')[0];
+  const withoutQuery = withoutHash.split('?')[0];
+  return withoutQuery.endsWith('.torrent');
+};
+
 /**
  * Expands numeric `[01-10]` or alphabetic `[a-z]` batch wildcard patterns.
  * Preserves zero-padding width (e.g., `[001-012]`) and caps expansion at 500 items.
@@ -75,6 +95,10 @@ export const DEFAULT_CLIPBOARD_CONFIG: ClipboardMonitorConfig = {
 export const expandBatchPattern = (pattern: string): string[] => {
   const trimmed = pattern.trim();
   if (!trimmed) return [];
+
+  if (isMagnetUri(trimmed) || trimmed.toLowerCase().startsWith('dc-torrent://')) {
+    return [trimmed];
+  }
 
   const numMatch = trimmed.match(/\[(\d+)-(\d+)\]/);
   if (numMatch) {
@@ -111,7 +135,13 @@ export const expandBatchPattern = (pattern: string): string[] => {
 
 export const isSupportedDownloadUrl = (rawUrl: string): boolean => {
   const s = rawUrl.trim().toLowerCase();
-  return s.startsWith('http://') || s.startsWith('https://') || s.startsWith('ftp://');
+  return (
+    s.startsWith('http://') ||
+    s.startsWith('https://') ||
+    s.startsWith('ftp://') ||
+    s.startsWith('magnet:') ||
+    s.startsWith('dc-torrent://')
+  );
 };
 
 /**
@@ -125,8 +155,8 @@ export const parseUrlListText = (rawText: string): string[] => {
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) continue;
-    // Extract all http(s)/ftp tokens or wildcard patterns from line
-    const tokenMatches = trimmed.match(/(?:https?|ftp):\/\/[^\s"'<>]+/gi);
+    // Extract all http(s)/ftp/magnet/dc-torrent tokens or wildcard patterns from line
+    const tokenMatches = trimmed.match(/(?:(?:https?|ftp):\/\/|magnet:\?|dc-torrent:\/\/)[^\s"'<>]+/gi);
     if (tokenMatches) {
       for (const token of tokenMatches) {
         for (const expanded of expandBatchPattern(token)) {
@@ -136,7 +166,7 @@ export const parseUrlListText = (rawText: string): string[] => {
           }
         }
       }
-    } else if (/^<\s*(?:https?|ftp):\/\//i.test(trimmed)) {
+    } else if (/^<\s*(?:(?:https?|ftp):\/\/|magnet:\?|dc-torrent:\/\/)/i.test(trimmed)) {
       const cleaned = trimmed.replace(/^<\s*/, '').replace(/\s*>$/, '');
       if (isSupportedDownloadUrl(cleaned) && !seen.has(cleaned)) {
         seen.add(cleaned);
@@ -148,8 +178,29 @@ export const parseUrlListText = (rawText: string): string[] => {
 };
 
 export const deriveFileNameFromUrl = (rawUrl: string): string => {
+  const trimmed = rawUrl.trim();
+  if (isMagnetUri(trimmed)) {
+    const qIdx = trimmed.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(trimmed.slice(qIdx + 1));
+      const dn = params.get('dn')?.trim();
+      if (dn) {
+        return dn.replace(/[\\/]+/g, '_');
+      }
+      const xt = params.get('xt')?.trim();
+      if (xt) {
+        const hash = xt.split(':').pop() || 'torrent';
+        return `torrent_${hash.slice(0, 12)}`;
+      }
+    }
+    return 'torrent_download';
+  }
+  if (trimmed.toLowerCase().startsWith('dc-torrent://')) {
+    const hash = trimmed.slice('dc-torrent://'.length).split(/[/?#]/)[0];
+    return hash ? `torrent_${hash.slice(0, 12)}` : 'torrent_download';
+  }
   try {
-    const parsed = new URL(rawUrl);
+    const parsed = new URL(trimmed);
     const parts = parsed.pathname.split('/').filter(Boolean);
     if (parts.length > 0) {
       return decodeURIComponent(parts[parts.length - 1]);
@@ -190,8 +241,16 @@ export const findMatchingSiteLogin = (
 
 export const matchCategoryForFile = (
   fileName: string,
-  rules: CategoryRule[]
+  rules: CategoryRule[],
+  urlHint?: string
 ): { categoryId: string; saveDir: string } => {
+  if (urlHint && (isMagnetUri(urlHint) || urlHint.trim().toLowerCase().startsWith('dc-torrent://'))) {
+    const torrentRule = rules.find((r) => r.id === 'torrents');
+    return {
+      categoryId: 'torrents',
+      saveDir: torrentRule?.saveDir || '~/Downloads/Torrents',
+    };
+  }
   const dotIdx = fileName.lastIndexOf('.');
   const ext = dotIdx >= 0 ? fileName.slice(dotIdx + 1).toLowerCase() : '';
   if (ext) {
@@ -215,14 +274,16 @@ export const shouldInterceptClipboardUrl = (
   if (!config.enabled) return false;
   const trimmed = text.trim();
   if (!isSupportedDownloadUrl(trimmed) || /\s/.test(trimmed)) return false;
+  const allowedExts = config.extensions.map((e) => e.trim().toLowerCase().replace(/^\./, ''));
+  if (isMagnetUri(trimmed)) {
+    return allowedExts.includes('torrent');
+  }
   try {
     const parsed = new URL(trimmed);
     const lastSeg = parsed.pathname.split('/').pop() || '';
     const ext = lastSeg.includes('.') ? lastSeg.split('.').pop()?.toLowerCase() || '' : '';
     if (!ext) return false;
-    return config.extensions
-      .map((e) => e.trim().toLowerCase().replace(/^\./, ''))
-      .includes(ext);
+    return allowedExts.includes(ext);
   } catch {
     return false;
   }
@@ -255,7 +316,7 @@ export const isWithinScheduleWindow = (
 
 export const formatDiskBytes = (
   bytes: number | null | undefined,
-  unknownLabel = 'Tidak diketahui'
+  unknownLabel = 'Unknown'
 ): string => {
   if (bytes === null || bytes === undefined) return unknownLabel;
   if (bytes <= 0) return '0 B';

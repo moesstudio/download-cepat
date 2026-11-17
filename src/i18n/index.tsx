@@ -6,7 +6,7 @@ import {
 } from './translations.ts';
 
 export type { LanguageCode, LanguageOption, TranslationKey } from './translations.ts';
-export { LANGUAGE_OPTIONS, isValidLanguage, translate } from './translations.ts';
+export { LANGUAGE_OPTIONS, isRtlLanguage, isValidLanguage, translate } from './translations.ts';
 
 export interface I18nContextValue {
   lang: LanguageCode;
@@ -15,9 +15,9 @@ export interface I18nContextValue {
 }
 
 const DEFAULT_I18N: I18nContextValue = {
-  lang: 'id',
+  lang: 'en',
   setLang: () => {},
-  t: (key, params) => translate('id', key, params),
+  t: (key, params) => translate('en', key, params),
 };
 
 const I18nContext = createContext<I18nContextValue>(DEFAULT_I18N);

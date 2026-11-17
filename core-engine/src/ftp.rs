@@ -231,6 +231,7 @@ pub async fn inspect_ftp(
         last_modified: None,
         suggested_category,
         media_info: None,
+        torrent_info: None,
     })
 }
 
@@ -357,6 +358,8 @@ pub async fn download_ftp(
                 eta_seconds: if status == TaskStatus::Completed { Some(0) } else { eta },
                 status,
                 segments: vec![seg],
+                peers: None,
+                seeds: None,
             });
         }
     };

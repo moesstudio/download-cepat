@@ -93,6 +93,7 @@ impl Storage {
               ('music', 'Music', 'music', '["mp3","wav","flac","aac","ogg","m4a"]', '~/Downloads/Music'),
               ('programs', 'Programs', 'cpu', '["exe","msi","dmg","pkg","deb","rpm","appimage"]', '~/Downloads/Programs'),
               ('video', 'Video', 'video', '["mp4","mkv","avi","mov","webm","flv","ts"]', '~/Downloads/Video'),
+              ('torrents', 'Torrents', 'magnet', '["torrent"]', '~/Downloads/Torrents'),
               ('general', 'General', 'folder', '[]', '~/Downloads');
         "#)?;
 

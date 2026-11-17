@@ -9,7 +9,8 @@ import {
   CheckCircle2, 
   Clock, 
   Layers,
-  Info
+  Info,
+  Magnet
 } from 'lucide-react';
 import { Category } from '../types.ts';
 import { useI18n } from '../i18n/index.tsx';
@@ -47,6 +48,7 @@ export const CategorySidebar: React.FC<CategorySidebarProps> = ({
       case 'music': return <Music className="w-4 h-4 text-purple-600" />;
       case 'programs': return <Cpu className="w-4 h-4 text-red-600" />;
       case 'video': return <Film className="w-4 h-4 text-emerald-600" />;
+      case 'torrents': return <Magnet className="w-4 h-4 text-cyan-500" />;
       default: return <Folder className="w-4 h-4 text-text-muted" />;
     }
   };
@@ -58,6 +60,7 @@ export const CategorySidebar: React.FC<CategorySidebarProps> = ({
       case 'music': return t('sidebar.catMusic');
       case 'programs': return t('sidebar.catPrograms');
       case 'video': return t('sidebar.catVideo');
+      case 'torrents': return t('sidebar.catTorrents');
       default: return cat.name;
     }
   };

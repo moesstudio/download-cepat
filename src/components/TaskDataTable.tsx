@@ -11,7 +11,8 @@ import {
   AlertCircle,
   PauseCircle,
   Clock,
-  XCircle
+  XCircle,
+  Magnet
 } from 'lucide-react';
 import { DownloadTask } from '../types.ts';
 import { SegmentedProgressBar } from './SegmentedProgressBar.tsx';
@@ -61,6 +62,7 @@ export const TaskDataTable: React.FC<TaskDataTableProps> = ({
       case 'music': return <FileAudio className="w-4 h-4 text-purple-600 shrink-0" />;
       case 'programs': return <FileCode className="w-4 h-4 text-red-600 shrink-0" />;
       case 'documents': return <FileText className="w-4 h-4 text-blue-600 shrink-0" />;
+      case 'torrents': return <Magnet className="w-4 h-4 text-cyan-500 shrink-0" />;
       default: return <File className="w-4 h-4 text-text-muted shrink-0" />;
     }
   };
@@ -208,6 +210,17 @@ export const TaskDataTable: React.FC<TaskDataTableProps> = ({
                         {task.resolution}
                       </span>
                     )}
+                    {(task.categoryId === 'torrents' ||
+                      typeof task.peers === 'number' ||
+                      typeof task.seeds === 'number') &&
+                      task.status !== 'completed' && (
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-500/15 text-cyan-400 font-semibold font-mono shrink-0">
+                          {t('torrent.peersSeeds', {
+                            peers: task.peers ?? 0,
+                            seeds: task.seeds ?? 0,
+                          })}
+                        </span>
+                      )}
                   </div>
                 </td>
                 <td className="py-2.5 px-3 font-mono text-text-muted">

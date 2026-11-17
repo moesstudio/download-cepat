@@ -5,7 +5,7 @@ let cachedData = null;
 let activeInspectUrl = '';
 let activeInspectPromise = null;
 let inspectGeneration = 0;
-let dcContentLang = 'id';
+let dcContentLang = 'en';
 
 function resetInspectCacheForUrl(nextUrl) {
   if (nextUrl === cachedUrl) return;
@@ -17,22 +17,6 @@ function resetInspectCacheForUrl(nextUrl) {
 }
 
 const DC_CONTENT_I18N = {
-  id: {
-    variableSize: 'Ukuran bervariasi',
-    downloadVideo: 'Download Video ⚡',
-    retryBtn: '🔄 Coba Lagi',
-    checkingFormats: 'Memeriksa resolusi yang tersedia di server...',
-    disconnectedTitle: 'Download Cepat belum terhubung',
-    disconnectedDesc: 'Pastikan aplikasi Download Cepat di desktop Anda sedang terbuka.',
-    notFoundTitle: 'Format video tidak ditemukan',
-    notFoundHint: 'Coba muat ulang halaman atau klik Coba Lagi.',
-    chooseQuality: 'Pilih Kualitas Video',
-    audioOnly: '🎵 Audio Saja (MP3 & M4A)',
-    bgStarted: 'Unduhan Dimulai di Latar Belakang!',
-    startFailed: 'Gagal memulai unduhan',
-    dismissTooltip: 'Sembunyikan tombol untuk video ini',
-    closeMenu: 'Tutup menu'
-  },
   en: {
     variableSize: 'Variable size',
     downloadVideo: 'Download Video ⚡',
@@ -48,6 +32,22 @@ const DC_CONTENT_I18N = {
     startFailed: 'Failed to start download',
     dismissTooltip: 'Dismiss button for this video',
     closeMenu: 'Close menu'
+  },
+  id: {
+    variableSize: 'Ukuran bervariasi',
+    downloadVideo: 'Download Video ⚡',
+    retryBtn: '🔄 Coba Lagi',
+    checkingFormats: 'Memeriksa resolusi yang tersedia di server...',
+    disconnectedTitle: 'Download Cepat belum terhubung',
+    disconnectedDesc: 'Pastikan aplikasi Download Cepat di desktop Anda sedang terbuka.',
+    notFoundTitle: 'Format video tidak ditemukan',
+    notFoundHint: 'Coba muat ulang halaman atau klik Coba Lagi.',
+    chooseQuality: 'Pilih Kualitas Video',
+    audioOnly: '🎵 Audio Saja (MP3 & M4A)',
+    bgStarted: 'Unduhan Dimulai di Latar Belakang!',
+    startFailed: 'Gagal memulai unduhan',
+    dismissTooltip: 'Sembunyikan tombol untuk video ini',
+    closeMenu: 'Tutup menu'
   },
   ms: {
     variableSize: 'Saiz berubah-ubah',
@@ -65,6 +65,22 @@ const DC_CONTENT_I18N = {
     dismissTooltip: 'Sembunyikan butang untuk video ini',
     closeMenu: 'Tutup menu'
   },
+  zh: {
+    variableSize: '大小可变',
+    downloadVideo: '下载视频 ⚡',
+    retryBtn: '🔄 重试',
+    checkingFormats: '正在从服务器检查可用分辨率...',
+    disconnectedTitle: 'Download Cepat 未连接',
+    disconnectedDesc: '请确保桌面端 Download Cepat 正在运行。',
+    notFoundTitle: '未找到视频格式',
+    notFoundHint: '请尝试刷新页面或点击重试。',
+    chooseQuality: '选择视频画质',
+    audioOnly: '🎵 仅音频 (MP3 & M4A)',
+    bgStarted: '已在后台开始下载！',
+    startFailed: '无法开始下载',
+    dismissTooltip: '隐藏此视频的按钮',
+    closeMenu: '关闭菜单'
+  },
   ja: {
     variableSize: 'サイズ可変',
     downloadVideo: '動画をダウンロード ⚡',
@@ -80,12 +96,188 @@ const DC_CONTENT_I18N = {
     startFailed: 'ダウンロードを開始できませんでした',
     dismissTooltip: 'この動画のボタンを非表示',
     closeMenu: 'メニューを閉じる'
+  },
+  ko: {
+    variableSize: '가변 크기',
+    downloadVideo: '동영상 다운로드 ⚡',
+    retryBtn: '🔄 다시 시도',
+    checkingFormats: '서버에서 사용 가능한 해상도 확인 중...',
+    disconnectedTitle: 'Download Cepat이 연결되지 않음',
+    disconnectedDesc: 'Download Cepat 데스크톱 앱이 실행 중인지 확인하세요.',
+    notFoundTitle: '동영상 형식을 찾을 수 없음',
+    notFoundHint: '페이지를 새로 고치거나 다시 시도를 클릭하세요.',
+    chooseQuality: '동영상 화질 선택',
+    audioOnly: '🎵 오디오만 (MP3 & M4A)',
+    bgStarted: '백그라운드에서 다운로드 시작됨!',
+    startFailed: '다운로드 시작 실패',
+    dismissTooltip: '이 동영상의 버튼 숨기기',
+    closeMenu: '메뉴 닫기'
+  },
+  es: {
+    variableSize: 'Tamaño variable',
+    downloadVideo: 'Descargar Video ⚡',
+    retryBtn: '🔄 Reintentar',
+    checkingFormats: 'Comprobando resoluciones disponibles en el servidor...',
+    disconnectedTitle: 'Download Cepat no está conectado',
+    disconnectedDesc: 'Asegúrate de que la app de escritorio Download Cepat esté ejecutándose.',
+    notFoundTitle: 'Formatos de video no encontrados',
+    notFoundHint: 'Intenta recargar la página o pulsa Reintentar.',
+    chooseQuality: 'Elegir Calidad de Video',
+    audioOnly: '🎵 Solo Audio (MP3 y M4A)',
+    bgStarted: '¡Descarga iniciada en segundo plano!',
+    startFailed: 'Error al iniciar la descarga',
+    dismissTooltip: 'Ocultar botón para este video',
+    closeMenu: 'Cerrar menú'
+  },
+  fr: {
+    variableSize: 'Taille variable',
+    downloadVideo: 'Télécharger la vidéo ⚡',
+    retryBtn: '🔄 Réessayer',
+    checkingFormats: 'Vérification des résolutions disponibles sur le serveur...',
+    disconnectedTitle: 'Download Cepat non connecté',
+    disconnectedDesc: 'Assurez-vous que l’application Download Cepat est ouverte.',
+    notFoundTitle: 'Formats vidéo introuvables',
+    notFoundHint: 'Rechargez la page ou cliquez sur Réessayer.',
+    chooseQuality: 'Choisir la qualité vidéo',
+    audioOnly: '🎵 Audio uniquement (MP3 & M4A)',
+    bgStarted: 'Téléchargement démarré en arrière-plan !',
+    startFailed: 'Échec du démarrage du téléchargement',
+    dismissTooltip: 'Masquer le bouton pour cette vidéo',
+    closeMenu: 'Fermer le menu'
+  },
+  de: {
+    variableSize: 'Variable Größe',
+    downloadVideo: 'Video herunterladen ⚡',
+    retryBtn: '🔄 Erneut versuchen',
+    checkingFormats: 'Verfügbare Auflösungen werden geprüft...',
+    disconnectedTitle: 'Download Cepat nicht verbunden',
+    disconnectedDesc: 'Stellen Sie sicher, dass die Download Cepat Desktop-App läuft.',
+    notFoundTitle: 'Videoformate nicht gefunden',
+    notFoundHint: 'Laden Sie die Seite neu oder klicken Sie auf Erneut versuchen.',
+    chooseQuality: 'Videoqualität wählen',
+    audioOnly: '🎵 Nur Audio (MP3 & M4A)',
+    bgStarted: 'Download im Hintergrund gestartet!',
+    startFailed: 'Download konnte nicht gestartet werden',
+    dismissTooltip: 'Schaltfläche für dieses Video ausblenden',
+    closeMenu: 'Menü schließen'
+  },
+  pt: {
+    variableSize: 'Tamanho variável',
+    downloadVideo: 'Baixar Vídeo ⚡',
+    retryBtn: '🔄 Tentar Novamente',
+    checkingFormats: 'Verificando resoluções disponíveis no servidor...',
+    disconnectedTitle: 'Download Cepat não está conectado',
+    disconnectedDesc: 'Certifique-se de que o aplicativo Download Cepat esteja em execução.',
+    notFoundTitle: 'Formatos de vídeo não encontrados',
+    notFoundHint: 'Recarregue a página ou clique em Tentar Novamente.',
+    chooseQuality: 'Escolher Qualidade do Vídeo',
+    audioOnly: '🎵 Apenas Áudio (MP3 & M4A)',
+    bgStarted: 'Download iniciado em segundo plano!',
+    startFailed: 'Falha ao iniciar o download',
+    dismissTooltip: 'Ocultar botão para este vídeo',
+    closeMenu: 'Fechar menu'
+  },
+  ru: {
+    variableSize: 'Переменный размер',
+    downloadVideo: 'Скачать видео ⚡',
+    retryBtn: '🔄 Повторить',
+    checkingFormats: 'Проверка доступных разрешений на сервере...',
+    disconnectedTitle: 'Download Cepat не подключён',
+    disconnectedDesc: 'Убедитесь, что настольное приложение Download Cepat запущено.',
+    notFoundTitle: 'Форматы видео не найдены',
+    notFoundHint: 'Обновите страницу или нажмите «Повторить».',
+    chooseQuality: 'Выбрать качество видео',
+    audioOnly: '🎵 Только аудио (MP3 и M4A)',
+    bgStarted: 'Загрузка начата в фоновом режиме!',
+    startFailed: 'Не удалось начать загрузку',
+    dismissTooltip: 'Скрыть кнопку для этого видео',
+    closeMenu: 'Закрыть меню'
+  },
+  ar: {
+    variableSize: 'حجم متغير',
+    downloadVideo: 'تنزيل الفيديو ⚡',
+    retryBtn: '🔄 إعادة المحاولة',
+    checkingFormats: 'جارٍ التحقق من الدقات المتاحة من الخادم...',
+    disconnectedTitle: 'Download Cepat غير متصل',
+    disconnectedDesc: 'تأكد من تشغيل تطبيق سطح المكتب Download Cepat.',
+    notFoundTitle: 'لم يتم العثور على صيغ الفيديو',
+    notFoundHint: 'حاول إعادة تحميل الصفحة أو انقر إعادة المحاولة.',
+    chooseQuality: 'اختر جودة الفيديو',
+    audioOnly: '🎵 صوت فقط (MP3 و M4A)',
+    bgStarted: 'بدأ التنزيل في الخلفية!',
+    startFailed: 'فشل بدء التنزيل',
+    dismissTooltip: 'إخفاء الزر لهذا الفيديو',
+    closeMenu: 'إغلاق القائمة'
+  },
+  hi: {
+    variableSize: 'परिवर्तनीय आकार',
+    downloadVideo: 'वीडियो डाउनलोड करें ⚡',
+    retryBtn: '🔄 पुनः प्रयास करें',
+    checkingFormats: 'सर्वर से उपलब्ध रिज़ॉल्यूशन जांचे जा रहे हैं...',
+    disconnectedTitle: 'Download Cepat कनेक्ट नहीं है',
+    disconnectedDesc: 'सुनिश्चित करें कि Download Cepat डेस्कटॉप ऐप चल रहा है।',
+    notFoundTitle: 'वीडियो प्रारूप नहीं मिले',
+    notFoundHint: 'पृष्ठ पुनः लोड करें या पुनः प्रयास करें पर क्लिक करें।',
+    chooseQuality: 'वीडियो गुणवत्ता चुनें',
+    audioOnly: '🎵 केवल ऑडियो (MP3 और M4A)',
+    bgStarted: 'पृष्ठभूमि में डाउनलोड शुरू हुआ!',
+    startFailed: 'डाउनलोड शुरू करने में विफल',
+    dismissTooltip: 'इस वीडियो के लिए बटन छिपाएं',
+    closeMenu: 'मेनू बंद करें'
+  },
+  vi: {
+    variableSize: 'Kích thước thay đổi',
+    downloadVideo: 'Tải Video ⚡',
+    retryBtn: '🔄 Thử lại',
+    checkingFormats: 'Đang kiểm tra độ phân giải khả dụng từ máy chủ...',
+    disconnectedTitle: 'Download Cepat chưa được kết nối',
+    disconnectedDesc: 'Hãy đảm bảo ứng dụng Download Cepat trên máy tính đang chạy.',
+    notFoundTitle: 'Không tìm thấy định dạng video',
+    notFoundHint: 'Thử tải lại trang hoặc nhấn Thử lại.',
+    chooseQuality: 'Chọn chất lượng video',
+    audioOnly: '🎵 Chỉ âm thanh (MP3 & M4A)',
+    bgStarted: 'Đã bắt đầu tải xuống trong nền!',
+    startFailed: 'Không thể bắt đầu tải xuống',
+    dismissTooltip: 'Ẩn nút cho video này',
+    closeMenu: 'Đóng menu'
+  },
+  th: {
+    variableSize: 'ขนาดไม่คงที่',
+    downloadVideo: 'ดาวน์โหลดวิดีโอ ⚡',
+    retryBtn: '🔄 ลองอีกครั้ง',
+    checkingFormats: 'กำลังตรวจสอบความละเอียดที่ใช้ได้จากเซิร์ฟเวอร์...',
+    disconnectedTitle: 'ยังไม่ได้เชื่อมต่อ Download Cepat',
+    disconnectedDesc: 'โปรดตรวจสอบว่าแอปเดสก์ท็อป Download Cepat กำลังทำงานอยู่',
+    notFoundTitle: 'ไม่พบรูปแบบวิดีโอ',
+    notFoundHint: 'ลองรีเฟรชหน้าเว็บหรือคลิกลองอีกครั้ง',
+    chooseQuality: 'เลือกคุณภาพวิดีโอ',
+    audioOnly: '🎵 เสียงเท่านั้น (MP3 & M4A)',
+    bgStarted: 'เริ่มดาวน์โหลดในพื้นหลังแล้ว!',
+    startFailed: 'ไม่สามารถเริ่มการดาวน์โหลดได้',
+    dismissTooltip: 'ซ่อนปุ่มสำหรับวิดีโอนี้',
+    closeMenu: 'ปิดเมนู'
+  },
+  tr: {
+    variableSize: 'Değişken boyut',
+    downloadVideo: 'Videoyu İndir ⚡',
+    retryBtn: '🔄 Yeniden Dene',
+    checkingFormats: 'Sunucudan kullanılabilir çözünürlükler denetleniyor...',
+    disconnectedTitle: 'Download Cepat bağlı değil',
+    disconnectedDesc: 'Download Cepat masaüstü uygulamasının çalıştığından emin olun.',
+    notFoundTitle: 'Video biçimleri bulunamadı',
+    notFoundHint: 'Sayfayı yenilemeyi deneyin veya Yeniden Dene’ye tıklayın.',
+    chooseQuality: 'Video Kalitesini Seçin',
+    audioOnly: '🎵 Yalnızca Ses (MP3 & M4A)',
+    bgStarted: 'İndirme Arka Planda Başlatıldı!',
+    startFailed: 'İndirme başlatılamadı',
+    dismissTooltip: 'Bu video için düğmeyi gizle',
+    closeMenu: 'Menüyü kapat'
   }
 };
 
 function dcText(key) {
-  const dict = DC_CONTENT_I18N[dcContentLang] || DC_CONTENT_I18N.id;
-  return dict[key] || DC_CONTENT_I18N.id[key] || '';
+  const dict = DC_CONTENT_I18N[dcContentLang] || DC_CONTENT_I18N.en;
+  return dict[key] || DC_CONTENT_I18N.en[key] || '';
 }
 
 function escapeHtml(value) {
@@ -98,6 +290,10 @@ function escapeHtml(value) {
 }
 
 function updateFloatingButtonLabels() {
+  const dir = dcContentLang === 'ar' ? 'rtl' : 'ltr';
+  document.querySelectorAll('.download-cepat-video-container').forEach((el) => {
+    el.style.direction = dir;
+  });
   document.querySelectorAll('.download-cepat-btn-label').forEach((el) => {
     el.textContent = dcText('downloadVideo');
   });
@@ -176,6 +372,7 @@ function showInPageToast(message, isError = false) {
     align-items: center;
     gap: 10px;
     max-width: 380px;
+    direction: ${dcContentLang === 'ar' ? 'rtl' : 'ltr'};
     animation: dcFadeIn 0.25s ease-out;
   `;
 

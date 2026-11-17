@@ -5,7 +5,12 @@ import {
   FileChecksums,
   GrabbedAsset,
   InspectResult,
+  OpenDownloadPopupParams,
+  PopupPrebufferState,
+  PopupPromoteParams,
+  PopupWindowSession,
   PostDownloadAction,
+  StartPopupPreDownloadParams,
   UpdateInstallResult,
 } from '../types.ts';
 
@@ -78,7 +83,7 @@ export const openNativeFolder = async (path: string): Promise<{ success: boolean
     // Web browser fallback
     return {
       success: true,
-      message: `Folder penyimpanan: ${path}. (Akan langsung membuka Finder/Explorer saat dijalankan di aplikasi desktop)`,
+      message: `Save folder: ${path}. (Opens Finder/Explorer directly in the desktop app)`,
     };
   }
 };
@@ -96,7 +101,7 @@ export const openNativeFile = async (path: string): Promise<{ success: boolean; 
     // Web browser fallback
     return {
       success: true,
-      message: `Membuka berkas: ${path}. (Akan langsung membuka aplikasi default di desktop)`,
+      message: `Opening file: ${path}. (Opens the default app directly on desktop)`,
     };
   }
 };
@@ -237,7 +242,7 @@ export const installBrowserExtensionHost = async (): Promise<{ success: boolean;
       return { success: false, message: String(err) };
     }
   }
-  return { success: true, message: 'Konektor extension dikonfigurasi (mode browser preview).' };
+  return { success: true, message: 'Extension connector configured (browser preview mode).' };
 };
 
 export const OFFICIAL_CHROME_WEBSTORE_URL =
@@ -251,11 +256,11 @@ export const openExternalUrl = async (url: string): Promise<{ success: boolean; 
       return { success: true, message: msg };
     } catch {
       window.open(url, '_blank');
-      return { success: true, message: 'URL dibuka di browser' };
+      return { success: true, message: 'URL opened in browser' };
     }
   }
   window.open(url, '_blank');
-  return { success: true, message: 'URL dibuka di browser' };
+  return { success: true, message: 'URL opened in browser' };
 };
 
 export const openExtensionFolder = async (): Promise<{ success: boolean; message: string }> => {
@@ -267,7 +272,7 @@ export const openExtensionFolder = async (): Promise<{ success: boolean; message
       return { success: false, message: String(err) };
     }
   }
-  return { success: true, message: 'Folder ekstensi: /extension' };
+  return { success: true, message: 'Extension folder: /extension' };
 };
 
 export const updateDownloadSpeedLimit = async (
@@ -440,6 +445,7 @@ export interface RuntimeDownloadSettingsPayload {
   proxyUrl?: string | null;
   videoSaveDir: string;
   musicSaveDir: string;
+  torrentsSaveDir: string;
 }
 
 export const syncRuntimeSettings = async (
@@ -450,6 +456,173 @@ export const syncRuntimeSettings = async (
       await invoke('sync_runtime_settings', { settings });
     } catch (err) {
       console.warn('Failed to sync runtime download settings:', err);
+    }
+  }
+};
+
+export const inspectTorrentBytes = async (bytes: number[]): Promise<InspectResult | null> => {
+  if (bytes.length === 0) return null;
+  if (isTauri()) {
+    return await invoke<InspectResult>('inspect_torrent_bytes', { bytes });
+  }
+  const pseudoHash = Array.from(bytes.slice(0, 20))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+    .padEnd(40, '0')
+    .slice(0, 40);
+  return {
+    url: `dc-torrent://${pseudoHash}`,
+    finalUrl: `dc-torrent://${pseudoHash}`,
+    fileName: `torrent_${pseudoHash.slice(0, 8)}`,
+    fileSize: null,
+    supportsRange: true,
+    mimeType: 'application/x-bittorrent',
+    suggestedCategory: 'torrents',
+    torrentInfo: {
+      infoHash: pseudoHash,
+      name: `torrent_${pseudoHash.slice(0, 8)}`,
+      totalSize: 0,
+      pieceLength: 262144,
+      pieceCount: 0,
+      trackers: [],
+      files: [],
+      isMultiFile: false,
+      isMagnet: false,
+    },
+  };
+};
+
+export const openDownloadPopup = async (params: OpenDownloadPopupParams): Promise<string> => {
+  if (isTauri()) {
+    return await invoke<string>('open_download_popup', { params });
+  }
+  return `dl-popup-preview-${Date.now()}`;
+};
+
+export const getPopupSession = async (popupId: string): Promise<PopupWindowSession | null> => {
+  if (isTauri()) {
+    try {
+      return await invoke<PopupWindowSession | null>('get_popup_session', {
+        popupId,
+        popup_id: popupId,
+      });
+    } catch (err) {
+      console.warn('Failed to load popup session:', err);
+      return null;
+    }
+  }
+  return null;
+};
+
+export const startPopupPreDownload = async (
+  params: StartPopupPreDownloadParams
+): Promise<PopupPrebufferState | null> => {
+  if (isTauri()) {
+    try {
+      return await invoke<PopupPrebufferState | null>('start_popup_pre_download', { params });
+    } catch (err) {
+      console.warn('Failed starting popup pre-download:', err);
+      return null;
+    }
+  }
+  return null;
+};
+
+export const promotePopupDownload = async (
+  params: PopupPromoteParams
+): Promise<PopupWindowSession> => {
+  if (isTauri()) {
+    return await invoke<PopupWindowSession>('promote_popup_download', { params });
+  }
+  return {
+    popupId: params.popupId,
+    mode: 'mini_progress',
+    source: 'manual',
+    initialMode: 'url',
+    url: params.url,
+    fileName: params.fileName,
+    destinationPath: params.destinationPath,
+    categoryId: params.categoryId,
+    numConnections: params.numConnections,
+    formatId: params.formatId ?? null,
+    resolution: params.resolution ?? null,
+    cookie: params.cookie ?? null,
+    referer: params.referer ?? null,
+    userAgent: params.userAgent ?? null,
+    fileSize: params.fileSize ?? null,
+    mimeType: params.mimeType ?? null,
+    proxyUrl: params.proxyUrl ?? null,
+    authUsername: params.authUsername ?? null,
+    authPassword: params.authPassword ?? null,
+    speedLimitBytesPerSec: params.speedLimitKbs ? params.speedLimitKbs * 1024 : null,
+    taskId: `task-preview-${Date.now()}`,
+    prebuffer: {
+      status: 'downloading',
+      runId: 1,
+      url: params.url,
+      fileName: params.fileName,
+      downloadedBytes: 0,
+      totalBytes: params.fileSize ?? null,
+      speedBytesPerSec: 0,
+      progressPercent: 0,
+      supportsRange: true,
+    },
+  };
+};
+
+export const queuePopupLater = async (params: PopupPromoteParams): Promise<void> => {
+  if (isTauri()) {
+    await invoke('queue_popup_later', { params });
+  }
+};
+
+export const cancelPopupDownload = async (popupId: string): Promise<boolean> => {
+  if (isTauri()) {
+    try {
+      return await invoke<boolean>('cancel_popup_download', {
+        popupId,
+        popup_id: popupId,
+      });
+    } catch (err) {
+      console.warn('Failed canceling popup download:', err);
+      return false;
+    }
+  }
+  return true;
+};
+
+export const openMainWindow = async (): Promise<void> => {
+  if (isTauri()) {
+    try {
+      await invoke('open_main_window');
+    } catch (err) {
+      console.warn('Failed opening main window:', err);
+    }
+  }
+};
+
+export const minimizePopupWindow = async (popupId: string): Promise<void> => {
+  if (isTauri()) {
+    try {
+      await invoke('minimize_popup_window', {
+        popupId,
+        popup_id: popupId,
+      });
+    } catch (err) {
+      console.warn('Failed minimizing popup window:', err);
+    }
+  }
+};
+
+export const closePopupWindow = async (popupId: string): Promise<void> => {
+  if (isTauri()) {
+    try {
+      await invoke('close_popup_window', {
+        popupId,
+        popup_id: popupId,
+      });
+    } catch (err) {
+      console.warn('Failed closing popup window:', err);
     }
   }
 };
@@ -491,7 +664,7 @@ export const downloadAndInstallAppUpdate = async (): Promise<UpdateInstallResult
   }
   return {
     startedInPlace: false,
-    message: 'Auto-update tersedia pada aplikasi desktop Download Cepat.',
+    message: 'Auto-update is available in the Download Cepat desktop application.',
     assetPath: null,
   };
 };

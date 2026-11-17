@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Pause, Play, Square, Zap, AlertCircle, RefreshCw } from 'lucide-react';
+import { X, Pause, Play, Square, Zap, AlertCircle, RefreshCw, Magnet } from 'lucide-react';
 import { DownloadTask } from '../types.ts';
 import { SegmentedProgressBar } from './SegmentedProgressBar.tsx';
 import { SpeedGraphCanvas } from './SpeedGraphCanvas.tsx';
@@ -37,6 +37,10 @@ export const DownloadProgressModal: React.FC<DownloadProgressModalProps> = ({
   };
 
   const isPaused = task.status === 'paused';
+  const showPeers =
+    task.categoryId === 'torrents' ||
+    typeof task.peers === 'number' ||
+    typeof task.seeds === 'number';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 select-none">
@@ -44,10 +48,19 @@ export const DownloadProgressModal: React.FC<DownloadProgressModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
           <div className="flex items-center space-x-2 truncate">
-            <Zap className="w-4 h-4 text-accent shrink-0" />
+            {showPeers ? (
+              <Magnet className="w-4 h-4 text-cyan-500 shrink-0" />
+            ) : (
+              <Zap className="w-4 h-4 text-accent shrink-0" />
+            )}
             <h2 className="text-sm font-bold text-text truncate" title={task.fileName}>
               {task.fileName}
             </h2>
+            {showPeers && (
+              <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-mono text-[10px] shrink-0">
+                {t('torrent.peersSeeds', { peers: task.peers ?? 0, seeds: task.seeds ?? 0 })}
+              </span>
+            )}
           </div>
           <button
             onClick={onClose}

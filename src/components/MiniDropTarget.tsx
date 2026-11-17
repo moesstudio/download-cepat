@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Download, Zap, X } from 'lucide-react';
+import { inspectTorrentBytes } from '../services/nativeBridge.ts';
 import { parseUrlListText } from '../utils/downloadUtils.ts';
 import { useI18n } from '../i18n/index.tsx';
 
@@ -38,7 +39,15 @@ export const MiniDropTarget: React.FC<MiniDropTargetProps> = ({
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       for (const file of Array.from(e.dataTransfer.files)) {
-        if (/\.(txt|ef2|lst)$/i.test(file.name)) {
+        if (/\.torrent$/i.test(file.name)) {
+          try {
+            const buf = await file.arrayBuffer();
+            const res = await inspectTorrentBytes(Array.from(new Uint8Array(buf)));
+            if (res?.url) {
+              collected.push(res.url);
+            }
+          } catch {}
+        } else if (/\.(txt|ef2|lst)$/i.test(file.name)) {
           const text = await file.text();
           collected.push(...parseUrlListText(text));
         }

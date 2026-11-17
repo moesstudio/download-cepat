@@ -1479,6 +1479,7 @@ mod tests {
                     is_audio_only: false,
                 }],
             }),
+            torrent_info: None,
         }
     }
 

@@ -110,6 +110,8 @@ export interface DownloadTask {
   checksums?: FileChecksums;
   httpLogs?: TaskHttpLog[];
   segments?: DownloadSegment[];
+  peers?: number;
+  seeds?: number;
 }
 
 export interface IncomingDownloadMeta {
@@ -149,6 +151,23 @@ export interface MediaInfo {
   formats: VideoFormat[];
 }
 
+export interface TorrentFileEntry {
+  path: string;
+  length: number;
+}
+
+export interface TorrentInfo {
+  infoHash: string;
+  name: string;
+  totalSize: number;
+  pieceLength: number;
+  pieceCount: number;
+  trackers: string[];
+  files: TorrentFileEntry[];
+  isMultiFile: boolean;
+  isMagnet: boolean;
+}
+
 export interface InspectResult {
   url: string;
   finalUrl: string;
@@ -158,6 +177,132 @@ export interface InspectResult {
   mimeType?: string;
   suggestedCategory: string;
   mediaInfo?: MediaInfo;
+  torrentInfo?: TorrentInfo;
+}
+
+export type PopupMode = 'confirm' | 'mini_progress';
+
+export type PopupPrebufferStatus =
+  | 'idle'
+  | 'inspecting'
+  | 'downloading'
+  | 'paused'
+  | 'completed'
+  | 'skipped'
+  | 'error';
+
+export interface PopupPrebufferState {
+  status: PopupPrebufferStatus | string;
+  runId: number;
+  url: string;
+  fileName?: string | null;
+  downloadedBytes: number;
+  totalBytes?: number | null;
+  speedBytesPerSec: number;
+  progressPercent: number;
+  supportsRange: boolean;
+  suggestedCategory?: string | null;
+  mimeType?: string | null;
+  etaSeconds?: number | null;
+  error?: string | null;
+  torrentInfo?: TorrentInfo | null;
+  mediaInfo?: MediaInfo | null;
+}
+
+export interface PopupPrebufferProgressPayload {
+  popupId: string;
+  state: PopupPrebufferState;
+}
+
+export interface PopupWindowSession {
+  popupId: string;
+  mode: PopupMode | string;
+  source: string;
+  initialMode: 'url' | 'torrent' | string;
+  url: string;
+  fileName: string;
+  destinationPath: string;
+  categoryId: string;
+  numConnections: number;
+  formatId?: string | null;
+  resolution?: string | null;
+  cookie?: string | null;
+  referer?: string | null;
+  userAgent?: string | null;
+  fileSize?: number | null;
+  mimeType?: string | null;
+  proxyUrl?: string | null;
+  authUsername?: string | null;
+  authPassword?: string | null;
+  speedLimitBytesPerSec?: number | null;
+  taskId?: string | null;
+  prebuffer: PopupPrebufferState;
+}
+
+export interface OpenDownloadPopupParams {
+  source?: string;
+  initialMode?: 'url' | 'torrent';
+  url?: string;
+  fileName?: string;
+  cookie?: string;
+  referer?: string;
+  userAgent?: string;
+  fileSize?: number | null;
+  mimeType?: string | null;
+}
+
+export interface StartPopupPreDownloadParams {
+  popupId: string;
+  url: string;
+  cookie?: string | null;
+  referer?: string | null;
+  userAgent?: string | null;
+  force?: boolean;
+}
+
+export interface PopupPromoteParams {
+  popupId: string;
+  url: string;
+  fileName: string;
+  destinationPath: string;
+  categoryId: string;
+  numConnections: number;
+  formatId?: string | null;
+  resolution?: string | null;
+  cookie?: string | null;
+  referer?: string | null;
+  userAgent?: string | null;
+  proxyUrl?: string | null;
+  authUsername?: string | null;
+  authPassword?: string | null;
+  speedLimitKbs?: number | null;
+  fileSize?: number | null;
+  mimeType?: string | null;
+}
+
+export interface PopupTaskEventPayload {
+  id: string;
+  url: string;
+  fileName: string;
+  destinationPath: string;
+  categoryId: string;
+  fileSize?: number | null;
+  downloadedBytes: number;
+  progressPercent: number;
+  status: string;
+  supportsRange: boolean;
+  mimeType?: string | null;
+  numConnections: number;
+  speedLimitBytesPerSec: number;
+  formatId?: string | null;
+  resolution?: string | null;
+  cookie?: string | null;
+  referer?: string | null;
+  userAgent?: string | null;
+  proxyUrl?: string | null;
+  authUsername?: string | null;
+  authPassword?: string | null;
+  source: string;
 }
 
 export interface BuildInfo {

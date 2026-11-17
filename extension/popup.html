@@ -126,43 +126,55 @@
       <div class="icon">⚡</div>
       <div>
         <div class="title">Download Cepat</div>
-        <div id="bridgeStatus" class="status">Memeriksa engine...</div>
+        <div id="bridgeStatus" class="status">Checking engine...</div>
       </div>
     </div>
     <div style="display:flex; align-items:center; gap:8px;">
       <select id="langSelect" class="lang-select" aria-label="Language">
-        <option value="id">ID</option>
         <option value="en">EN</option>
+        <option value="id">ID</option>
         <option value="ms">MS</option>
+        <option value="zh">ZH</option>
         <option value="ja">JA</option>
+        <option value="ko">KO</option>
+        <option value="es">ES</option>
+        <option value="fr">FR</option>
+        <option value="de">DE</option>
+        <option value="pt">PT</option>
+        <option value="ru">RU</option>
+        <option value="ar">AR</option>
+        <option value="hi">HI</option>
+        <option value="vi">VI</option>
+        <option value="th">TH</option>
+        <option value="tr">TR</option>
       </select>
       <label style="font-size:11px; display:flex; align-items:center; gap:4px; cursor:pointer;">
         <input type="checkbox" id="toggleIntercept" checked />
-        <span id="toggleActiveLabel">Aktif</span>
+        <span id="toggleActiveLabel">Active</span>
       </label>
     </div>
   </div>
 
   <div class="card">
     <div class="row">
-      <span id="siteHost" style="font-weight:600; color:#cbd5e1;">Situs aktif</span>
-      <button id="toggleSiteBtn" class="btn-secondary">Kecualikan</button>
+      <span id="siteHost" style="font-weight:600; color:#cbd5e1;">Active site</span>
+      <button id="toggleSiteBtn" class="btn-secondary">Exclude</button>
     </div>
   </div>
 
   <div class="card">
-    <button id="downloadAllBtn" class="btn-primary">Download Semua Link Halaman ⚡</button>
+    <button id="downloadAllBtn" class="btn-primary">Download All Page Links ⚡</button>
     <div id="feedback"></div>
   </div>
 
   <div class="card">
-    <div style="font-weight:600; color:#cbd5e1;"><span id="detectedMediaLabel">Media Terdeteksi di Tab</span> (<span id="streamCount">0</span>)</div>
+    <div style="font-weight:600; color:#cbd5e1;"><span id="detectedMediaLabel">Media Detected on Tab</span> (<span id="streamCount">0</span>)</div>
     <div id="streamList" class="streams">
-      <span id="emptyStreamMsg" style="color:#64748b;">Belum ada stream media terdeteksi.</span>
+      <span id="emptyStreamMsg" style="color:#64748b;">No media streams detected yet.</span>
     </div>
   </div>
 
-  <div class="footer-credit">Ujang Mustamar &bull; v1.0.4</div>
+  <div class="footer-credit">Ujang Mustamar &bull; v1.2.5</div>
 
   <script src="popup.js"></script>
 </body>

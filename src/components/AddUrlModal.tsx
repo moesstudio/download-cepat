@@ -1,5 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Link2, Folder, Download, Loader2, CheckCircle2, Film, Music, Sparkles, AlertCircle, RotateCw, KeyRound, HardDrive } from 'lucide-react';
+import {
+  X,
+  Link2,
+  Folder,
+  Download,
+  Loader2,
+  CheckCircle2,
+  Film,
+  Music,
+  Sparkles,
+  AlertCircle,
+  RotateCw,
+  KeyRound,
+  HardDrive,
+  Magnet,
+  Upload,
+} from 'lucide-react';
 import {
   Category,
   CategoryRule,
@@ -12,15 +28,19 @@ import {
 import {
   checkDiskSpace,
   inspectNativeUrlDetailed,
+  inspectTorrentBytes,
   isTauri,
   NativeHeaders,
   readClipboardText,
 } from '../services/nativeBridge.ts';
 import {
+  deriveFileNameFromUrl,
   findMatchingSiteLogin,
   formatDiskBytes,
   formatProxyUrl,
+  isMagnetUri,
   isSupportedDownloadUrl,
+  isTorrentReference,
   matchCategoryForFile,
 } from '../utils/downloadUtils.ts';
 import { useI18n } from '../i18n/index.tsx';
@@ -52,6 +72,7 @@ interface AddUrlModalProps {
   proxyConfig?: ProxyConfig;
   siteLogins?: SiteLogin[];
   initialUrl?: string;
+  initialMode?: 'url' | 'torrent';
   incomingMeta?: IncomingDownloadMeta;
   defaultConnections?: number;
 }
@@ -65,6 +86,7 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
   proxyConfig,
   siteLogins = [],
   initialUrl,
+  initialMode = 'url',
   incomingMeta,
   defaultConnections = 8,
 }) => {
@@ -81,6 +103,7 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
   const [sessionHeaders, setSessionHeaders] = useState<NativeHeaders | undefined>(undefined);
   const [freeDiskBytes, setFreeDiskBytes] = useState<number | null>(null);
   const probeReqIdRef = useRef(0);
+  const torrentFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -93,7 +116,7 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
     }
   }, [isOpen, defaultConnections]);
 
-  // Auto-read clipboard or use initialUrl / incomingMeta on open
+  // Auto-read clipboard or use initialUrl / incomingMeta / initialMode on open
   useEffect(() => {
     if (isOpen) {
       setNumConnections(defaultConnections);
@@ -118,15 +141,32 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         );
       } else {
         setSessionHeaders(undefined);
+        if (initialMode === 'torrent') {
+          const torrentRule = categoryRules.find((r) => r.id === 'torrents');
+          const torrentCat = categories.find((c) => c.id === 'torrents');
+          setSelectedCategory('torrents');
+          setSaveDir(torrentRule?.saveDir || torrentCat?.saveDir || '~/Downloads/Torrents');
+        } else {
+          setSelectedCategory('general');
+          setSaveDir('~/Downloads');
+        }
         readClipboardText().then((nativeText) => {
-          if (nativeText && isSupportedDownloadUrl(nativeText)) {
+          if (
+            nativeText &&
+            isSupportedDownloadUrl(nativeText) &&
+            (initialMode !== 'torrent' || isTorrentReference(nativeText))
+          ) {
             setUrl(nativeText);
             handleProbe(nativeText, undefined, undefined);
             return;
           }
           if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
             navigator.clipboard.readText().then((text) => {
-              if (text && isSupportedDownloadUrl(text)) {
+              if (
+                text &&
+                isSupportedDownloadUrl(text) &&
+                (initialMode !== 'torrent' || isTorrentReference(text))
+              ) {
                 setUrl(text);
                 handleProbe(text, undefined, undefined);
               }
@@ -143,7 +183,30 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
       setSelectedFormatId('1080p_mp4');
       setSessionHeaders(undefined);
     }
-  }, [isOpen, initialUrl, incomingMeta]);
+  }, [isOpen, initialUrl, initialMode, incomingMeta]);
+
+  const handleTorrentFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setInspectError(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const res = await inspectTorrentBytes(Array.from(new Uint8Array(buf)));
+      if (!res) return;
+      probeReqIdRef.current += 1;
+      setIsValidating(false);
+      setUrl(res.url);
+      setFileName(res.fileName || file.name.replace(/\.torrent$/i, ''));
+      const torrentRule = categoryRules.find((r) => r.id === 'torrents');
+      const torrentCat = categories.find((c) => c.id === 'torrents');
+      setSelectedCategory('torrents');
+      setSaveDir(torrentRule?.saveDir || torrentCat?.saveDir || '~/Downloads/Torrents');
+      setInspectInfo(res);
+    } catch (err) {
+      setInspectError(String(err));
+    }
+  };
 
   const handleProbe = (
     inputUrl: string,
@@ -159,8 +222,9 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
     const reqId = ++probeReqIdRef.current;
     setInspectError(null);
 
+    const isTorrent = isTorrentReference(inputUrl);
     const urlLower = inputUrl.toLowerCase();
-    const isVideo = urlLower.includes('youtube.com') ||
+    const isVideo = !isTorrent && (urlLower.includes('youtube.com') ||
       urlLower.includes('youtu.be') ||
       urlLower.includes('vimeo.com') ||
       urlLower.includes('tiktok.com') ||
@@ -170,60 +234,71 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
       urlLower.endsWith('.mp4') ||
       urlLower.endsWith('.mkv') ||
       urlLower.endsWith('.webm') ||
-      urlLower.endsWith('.m3u8');
+      urlLower.endsWith('.m3u8'));
 
-    let initialDerivedName = 'download.bin';
-    // Instant synchronous path extraction
+    let initialDerivedName =
+      suggestedFileName && suggestedFileName.trim().length > 0
+        ? suggestedFileName.trim()
+        : deriveFileNameFromUrl(inputUrl);
+
+    // Instant synchronous category & filename derivation
     try {
-      const parsed = new URL(inputUrl);
-      const pathParts = parsed.pathname.split('/').filter(Boolean);
-      let derivedName =
-        suggestedFileName && suggestedFileName.trim().length > 0
-          ? suggestedFileName.trim()
-          : pathParts.length > 0
-          ? decodeURIComponent(pathParts[pathParts.length - 1])
-          : 'download.bin';
-      
       let cat = 'general';
-      if (isVideo) {
+      if (isTorrent) {
+        cat = 'torrents';
+      } else if (isVideo) {
         cat = 'video';
+        const parsed = new URL(inputUrl);
         if (inputUrl.includes('v=')) {
           const vId = new URLSearchParams(parsed.search).get('v') || 'video';
-          derivedName = `Video_${vId}.mp4`;
-        } else if (!derivedName.includes('.')) {
-          derivedName = `${derivedName}.mp4`;
+          initialDerivedName = `Video_${vId}.mp4`;
+        } else if (!initialDerivedName.includes('.')) {
+          initialDerivedName = `${initialDerivedName}.mp4`;
         }
       } else {
-        const ext = derivedName.split('.').pop()?.toLowerCase();
+        const ext = initialDerivedName.split('.').pop()?.toLowerCase();
         if (['zip', 'rar', '7z', 'iso', 'tar', 'gz', 'bz2', 'xz'].includes(ext || '')) cat = 'compressed';
-        else if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'].includes(ext || '')) cat = 'video';
-        else if (['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg'].includes(ext || '')) cat = 'music';
+        else if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'ts'].includes(ext || '')) cat = 'video';
+        else if (['mp3', 'wav', 'flac', 'm4a', 'aac', 'ogg', 'opus'].includes(ext || '')) cat = 'music';
         else if (['exe', 'dmg', 'pkg', 'msi', 'deb', 'rpm', 'appimage', 'apk'].includes(ext || '')) cat = 'programs';
         else if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'epub'].includes(ext || '')) cat = 'documents';
       }
 
-      const customMatched = categoryRules.length > 0 ? matchCategoryForFile(derivedName, categoryRules) : null;
+      const customMatched =
+        categoryRules.length > 0
+          ? matchCategoryForFile(initialDerivedName, categoryRules, inputUrl)
+          : null;
       if (customMatched && customMatched.categoryId !== 'general') {
         cat = customMatched.categoryId;
       }
 
       const matchedRule = categoryRules.find((r) => r.id === cat);
-      const foundCategory = categories.find(c => c.id === cat);
-      if (foundCategory) {
-        setSelectedCategory(foundCategory.id);
+      const foundCategory = categories.find((c) => c.id === cat);
+      if (foundCategory || matchedRule || cat === 'torrents') {
+        setSelectedCategory(cat);
         setSaveDir(
           matchedRule?.saveDir ||
-            foundCategory.saveDir ||
-            (foundCategory.extensions ? `~/Downloads/${foundCategory.name}` : '~/Downloads')
+            foundCategory?.saveDir ||
+            (cat === 'torrents'
+              ? '~/Downloads/Torrents'
+              : foundCategory?.extensions
+              ? `~/Downloads/${foundCategory.name}`
+              : '~/Downloads')
         );
       } else {
         setSelectedCategory('general');
         setSaveDir('~/Downloads');
       }
 
-      initialDerivedName = derivedName;
-      setFileName(derivedName);
-    } catch (e) {}
+      setFileName(initialDerivedName);
+    } catch (e) {
+      if (isTorrent) {
+        setSelectedCategory('torrents');
+        const torrentRule = categoryRules.find((r) => r.id === 'torrents');
+        setSaveDir(torrentRule?.saveDir || '~/Downloads/Torrents');
+        setFileName(initialDerivedName);
+      }
+    }
 
     setIsValidating(true);
 
@@ -256,7 +331,7 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         }
         const customCat =
           nativeResult.fileName && categoryRules.length > 0
-            ? matchCategoryForFile(nativeResult.fileName, categoryRules)
+            ? matchCategoryForFile(nativeResult.fileName, categoryRules, inputUrl)
             : null;
         const resolvedCatId =
           customCat && customCat.categoryId !== 'general'
@@ -265,12 +340,16 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         if (resolvedCatId) {
           const found = categories.find((c) => c.id === resolvedCatId);
           const rule = categoryRules.find((r) => r.id === resolvedCatId);
-          if (found) {
-            setSelectedCategory(found.id);
+          if (found || rule || resolvedCatId === 'torrents') {
+            setSelectedCategory(resolvedCatId);
             setSaveDir(
               rule?.saveDir ||
-                found.saveDir ||
-                (found.extensions ? `~/Downloads/${found.name}` : '~/Downloads')
+                found?.saveDir ||
+                (resolvedCatId === 'torrents'
+                  ? '~/Downloads/Torrents'
+                  : found?.extensions
+                  ? `~/Downloads/${found.name}`
+                  : '~/Downloads')
             );
           } else {
             setSelectedCategory('general');
@@ -286,6 +365,34 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
       // Fallback for web browser / test preview environment
       setTimeout(() => {
         if (reqId !== probeReqIdRef.current) return;
+        if (!isTauri() && isTorrent) {
+          const xtMatch = inputUrl.match(/btih:([a-fA-F0-9]{40}|[A-Z2-7]{32})/i);
+          const dcMatch = inputUrl.match(/^dc-torrent:\/\/([^/?#]+)/i);
+          const infoHash = (xtMatch?.[1] || dcMatch?.[1] || '').toLowerCase();
+          setInspectInfo({
+            url: inputUrl,
+            finalUrl: inputUrl,
+            fileName: initialDerivedName,
+            fileSize: null,
+            supportsRange: true,
+            mimeType: 'application/x-bittorrent',
+            suggestedCategory: 'torrents',
+            torrentInfo: {
+              infoHash,
+              name: initialDerivedName,
+              totalSize: 0,
+              pieceLength: 262144,
+              pieceCount: 0,
+              trackers: [],
+              files: [],
+              isMultiFile: false,
+              isMagnet: isMagnetUri(inputUrl),
+            },
+          });
+          setIsValidating(false);
+          return;
+        }
+
         if (!isTauri() && isVideo) {
           const testFormats: VideoFormat[] = [
             {
@@ -386,6 +493,8 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         return t('sidebar.catPrograms');
       case 'video':
         return t('sidebar.catVideo');
+      case 'torrents':
+        return t('sidebar.catTorrents');
       default:
         return cat.name;
     }
@@ -401,14 +510,28 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
 
   if (!isOpen) return null;
 
+  const isTorrentMode =
+    initialMode === 'torrent' ||
+    Boolean(inspectInfo?.torrentInfo) ||
+    isTorrentReference(url) ||
+    selectedCategory === 'torrents';
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 select-none">
       <div className="bg-bg border border-border rounded-lg shadow-pop w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface">
           <div className="flex items-center space-x-2">
-            <Link2 className="w-4 h-4 text-accent" />
-            <h2 className="text-sm font-bold text-text">{t('addUrl.title')}</h2>
+            {isTorrentMode ? (
+              <Magnet className="w-4 h-4 text-accent" />
+            ) : (
+              <Link2 className="w-4 h-4 text-accent" />
+            )}
+            <h2 className="text-sm font-bold text-text">
+              {isTorrentMode && initialMode === 'torrent'
+                ? t('toolbar.addTorrentTitle')
+                : t('addUrl.title')}
+            </h2>
           </div>
           <button
             onClick={onClose}
@@ -423,14 +546,31 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
         <div className="p-4 space-y-4 text-xs">
           {/* URL Input */}
           <div className="space-y-1">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <label className="font-semibold text-text">{t('addUrl.urlLabel')}</label>
-              {sessionHeaders && (sessionHeaders.cookie || sessionHeaders.referer) && (
-                <span className="inline-flex items-center space-x-1 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-medium">
-                  <KeyRound className="w-3 h-3" />
-                  <span>{t('addUrl.browserSessionBadge')}</span>
-                </span>
-              )}
+              <div className="flex items-center space-x-1.5">
+                {sessionHeaders && (sessionHeaders.cookie || sessionHeaders.referer) && (
+                  <span className="inline-flex items-center space-x-1 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-medium">
+                    <KeyRound className="w-3 h-3" />
+                    <span>{t('addUrl.browserSessionBadge')}</span>
+                  </span>
+                )}
+                <input
+                  ref={torrentFileInputRef}
+                  type="file"
+                  accept=".torrent,application/x-bittorrent"
+                  onChange={handleTorrentFilePick}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => torrentFileInputRef.current?.click()}
+                  className="inline-flex items-center space-x-1 px-2 py-0.5 rounded bg-surface border border-border hover:bg-surface-hover text-[11px] font-medium text-accent transition-colors"
+                >
+                  <Upload className="w-3 h-3" />
+                  <span>{t('addUrl.pickTorrentFile')}</span>
+                </button>
+              </div>
             </div>
             <div className="relative">
               <input
@@ -537,37 +677,71 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
             </div>
           )}
 
-          {/* Standard Metadata Info Card if not video */}
-          {inspectInfo && !inspectInfo.mediaInfo && !inspectError && (
-            <div className="p-2.5 bg-surface rounded-md border border-border space-y-1.5 text-[11px]">
-              <div className="flex items-center justify-between font-medium">
-                <span className={`flex items-center space-x-1.5 ${inspectInfo.supportsRange ? 'text-success' : 'text-warning'}`}>
-                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>
-                    {inspectInfo.supportsRange
-                      ? t('addUrl.rangeSupported')
-                      : t('addUrl.rangeUnsupported')}
-                  </span>
+          {/* BitTorrent Detected Card */}
+          {(inspectInfo?.torrentInfo || isTorrentReference(url)) && !inspectError && (
+            <div className="p-2.5 bg-cyan-500/10 rounded-md border border-cyan-500/30 space-y-1 text-[11px]">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center space-x-1.5 font-semibold text-cyan-400">
+                  <Magnet className="w-3.5 h-3.5" />
+                  <span>{t('addUrl.torrentDetected')}</span>
                 </span>
-                <span className="font-mono text-text shrink-0 ml-2">
-                  {inspectInfo.supportsRange
-                    ? `${numConnections} ${t('common.threadsUnit')}`
-                    : t('addUrl.singleThread')}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-text-muted text-[10px]">
-                <span>
-                  {t('addUrl.originalSize')}{' '}
-                  <strong className="text-text font-mono">{formatBytes(inspectInfo.fileSize)}</strong>
-                </span>
-                {inspectInfo.mimeType && (
-                  <span className="font-mono truncate max-w-[200px]" title={inspectInfo.mimeType}>
-                    {inspectInfo.mimeType.split(';')[0]}
+                {inspectInfo?.torrentInfo && (
+                  <span className="font-mono text-text-muted">
+                    {inspectInfo.torrentInfo.files.length > 0
+                      ? `${t('addUrl.torrentFilesCount', {
+                          count: inspectInfo.torrentInfo.files.length,
+                        })} • ${formatBytes(inspectInfo.torrentInfo.totalSize)}`
+                      : formatBytes(inspectInfo.torrentInfo.totalSize)}
                   </span>
                 )}
               </div>
+              {inspectInfo?.torrentInfo?.infoHash && (
+                <p className="font-mono text-[10px] text-text-muted truncate">
+                  {t('addUrl.torrentInfoHash')}: {inspectInfo.torrentInfo.infoHash}
+                </p>
+              )}
+              {(inspectInfo?.torrentInfo?.isMagnet || isMagnetUri(url)) &&
+                (!inspectInfo?.torrentInfo || inspectInfo.torrentInfo.files.length === 0) && (
+                  <p className="text-[10px] text-text-muted">{t('addUrl.torrentMagnetHint')}</p>
+                )}
             </div>
           )}
+
+          {/* Standard Metadata Info Card if not video or torrent */}
+          {inspectInfo &&
+            !inspectInfo.mediaInfo &&
+            !inspectInfo.torrentInfo &&
+            !isTorrentReference(url) &&
+            !inspectError && (
+              <div className="p-2.5 bg-surface rounded-md border border-border space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between font-medium">
+                  <span className={`flex items-center space-x-1.5 ${inspectInfo.supportsRange ? 'text-success' : 'text-warning'}`}>
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>
+                      {inspectInfo.supportsRange
+                        ? t('addUrl.rangeSupported')
+                        : t('addUrl.rangeUnsupported')}
+                    </span>
+                  </span>
+                  <span className="font-mono text-text shrink-0 ml-2">
+                    {inspectInfo.supportsRange
+                      ? `${numConnections} ${t('common.threadsUnit')}`
+                      : t('addUrl.singleThread')}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-text-muted text-[10px]">
+                  <span>
+                    {t('addUrl.originalSize')}{' '}
+                    <strong className="text-text font-mono">{formatBytes(inspectInfo.fileSize)}</strong>
+                  </span>
+                  {inspectInfo.mimeType && (
+                    <span className="font-mono truncate max-w-[200px]" title={inspectInfo.mimeType}>
+                      {inspectInfo.mimeType.split(';')[0]}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
           {/* File Name */}
           <div className="space-y-1">
@@ -595,7 +769,11 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
                   setSaveDir(
                     rule?.saveDir ||
                       cat?.saveDir ||
-                      (cat?.extensions ? `~/Downloads/${cat.name}` : '~/Downloads')
+                      (val === 'torrents'
+                        ? '~/Downloads/Torrents'
+                        : cat?.extensions
+                        ? `~/Downloads/${cat.name}`
+                        : '~/Downloads')
                   );
                 }}
                 className="w-full px-2.5 py-1.5 rounded-md bg-surface border border-border-input/40 text-text focus:outline-none focus:ring-1 focus:ring-accent"
@@ -604,6 +782,9 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
                 {categories.map((c) => (
                   <option key={c.id} value={c.id}>{getCategoryLabel(c)}</option>
                 ))}
+                {!categories.some((c) => c.id === 'torrents') && (
+                  <option value="torrents">{t('sidebar.catTorrents')}</option>
+                )}
               </select>
             </div>
 

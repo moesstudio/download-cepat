@@ -65,6 +65,27 @@ pub struct MediaInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TorrentFileEntry {
+    pub path: String,
+    pub length: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentInfo {
+    pub info_hash: String,
+    pub name: String,
+    pub total_size: u64,
+    pub piece_length: u64,
+    pub piece_count: usize,
+    pub trackers: Vec<String>,
+    pub files: Vec<TorrentFileEntry>,
+    pub is_multi_file: bool,
+    pub is_magnet: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InspectResult {
     pub url: String,
     pub final_url: String,
@@ -76,6 +97,8 @@ pub struct InspectResult {
     pub last_modified: Option<String>,
     pub suggested_category: String,
     pub media_info: Option<MediaInfo>,
+    #[serde(default)]
+    pub torrent_info: Option<TorrentInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +121,10 @@ pub struct ProgressTelemetry {
     pub eta_seconds: Option<u64>,
     pub status: TaskStatus,
     pub segments: Vec<SegmentProgress>,
+    #[serde(default)]
+    pub peers: Option<usize>,
+    #[serde(default)]
+    pub seeds: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

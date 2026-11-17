@@ -1,8 +1,10 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
+import { PopupDownloadWindow } from './components/PopupDownloadWindow.tsx';
 import './index.css';
-import { isValidLanguage, LanguageCode, translate } from './i18n/translations.ts';
+import { I18nProvider } from './i18n/index.tsx';
+import { isRtlLanguage, isValidLanguage, LanguageCode, translate } from './i18n/translations.ts';
 
 interface Props {
   children: ReactNode;
@@ -29,13 +31,16 @@ class ErrorBoundary extends Component<Props, State> {
 
   public render() {
     if (this.state.hasError) {
-      let savedLang: LanguageCode = 'id';
+      let savedLang: LanguageCode = 'en';
       try {
         const raw = localStorage.getItem('download_cepat_lang');
         if (isValidLanguage(raw)) savedLang = raw;
       } catch {}
       return (
-        <div style={{ padding: 24, background: '#0b1120', color: '#f8fafc', height: '100vh', fontFamily: 'sans-serif' }}>
+        <div
+          dir={isRtlLanguage(savedLang) ? 'rtl' : 'ltr'}
+          style={{ padding: 24, background: '#0b1120', color: '#f8fafc', height: '100vh', fontFamily: 'sans-serif' }}
+        >
           <h2 style={{ color: '#ef4444', fontSize: 18, fontWeight: 'bold' }}>
             {translate(savedLang, 'errorBoundary.title')}
           </h2>
@@ -61,10 +66,47 @@ class ErrorBoundary extends Component<Props, State> {
   }
 }
 
+const PopupWindowRoot: React.FC = () => {
+  const [lang, setLang] = useState<LanguageCode>(() => {
+    try {
+      const saved = localStorage.getItem('download_cepat_lang');
+      if (isValidLanguage(saved)) return saved;
+    } catch {}
+    return 'en';
+  });
+
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = lang;
+      document.documentElement.dir = isRtlLanguage(lang) ? 'rtl' : 'ltr';
+    }
+  }, [lang]);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'download_cepat_lang' && isValidLanguage(e.newValue)) {
+        setLang(e.newValue);
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  return (
+    <I18nProvider lang={lang} setLang={setLang}>
+      <PopupDownloadWindow />
+    </I18nProvider>
+  );
+};
+
+const isPopupWindow =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).get('window') === 'popup';
+
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <App />
+      {isPopupWindow ? <PopupWindowRoot /> : <App />}
     </ErrorBoundary>
   </React.StrictMode>
 );
