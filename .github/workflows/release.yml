@@ -152,6 +152,7 @@ jobs:
           path: dist-android/*.apk
 
       - name: Attach Android APKs to GitHub Release
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
