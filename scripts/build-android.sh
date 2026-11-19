@@ -62,14 +62,14 @@ find_signed_release_apk() {
 
 echo "==> Building Download Cepat v${APP_VERSION} Android (arm64-v8a)..."
 rm -rf "$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk"
-npx tauri android build --apk --target aarch64 --ci
+ANDROID_ABI_FILTERS="arm64-v8a" npx tauri android build --apk --target aarch64 --ci
 ARM64_APK_SRC="$(find_signed_release_apk)"
 ARM64_APK_OUT="$INSTALLER_DIR/Download Cepat_${APP_VERSION}_arm64-v8a.apk"
 cp -f "$ARM64_APK_SRC" "$ARM64_APK_OUT"
 
 echo "==> Building Download Cepat v${APP_VERSION} Android (universal: arm64-v8a + armeabi-v7a)..."
 rm -rf "$ROOT_DIR/src-tauri/gen/android/app/build/outputs/apk"
-npx tauri android build --apk --target aarch64 armv7 --ci
+ANDROID_ABI_FILTERS="arm64-v8a,armeabi-v7a" npx tauri android build --apk --target aarch64 armv7 --ci
 UNIV_APK_SRC="$(find_signed_release_apk)"
 UNIV_APK_OUT="$INSTALLER_DIR/Download Cepat_${APP_VERSION}_universal.apk"
 cp -f "$UNIV_APK_SRC" "$UNIV_APK_OUT"

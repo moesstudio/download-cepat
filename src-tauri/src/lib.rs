@@ -1572,6 +1572,7 @@ fn is_video_or_stream_url(raw_url: &str) -> bool {
         "vimeo.com",
         "tiktok.com",
         "instagram.com",
+        "instagr.am",
         "twitter.com",
         "x.com",
         "dailymotion.com",
@@ -1579,6 +1580,9 @@ fn is_video_or_stream_url(raw_url: &str) -> bool {
         "twitch.tv",
         "facebook.com",
         "fb.watch",
+        "fb.com",
+        "threads.net",
+        "threads.com",
         "reddit.com",
         "redd.it",
         "bilibili.com",
@@ -1591,6 +1595,8 @@ fn is_video_or_stream_url(raw_url: &str) -> bool {
         "odysee.com",
         "kick.com",
         "ted.com",
+        "pinterest.com",
+        "pin.it",
     ];
     if VIDEO_DOMAINS.iter().any(|d| host_matches_domain(&host, d)) {
         return true;
@@ -1956,16 +1962,189 @@ async fn inspect_video_url_uncached(
         }
     };
 
-    let raw_title = json_val["title"].as_str().unwrap_or("video");
+    let result = build_inspect_result_from_ytdlp_json(url, &json_val)?;
+
+    let raw_key = raw_video_cache_key(
+        url,
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+    );
+    put_cached_raw_ytdlp_json(&raw_key, &json_val);
+
+    Ok(result)
+}
+
+#[cfg(target_os = "android")]
+async fn inspect_video_url_android(
+    app: &tauri::AppHandle,
+    url: &str,
+    cookie: Option<&str>,
+    referer: Option<&str>,
+    user_agent: Option<&str>,
+    proxy_url: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+) -> Result<InspectResult, String> {
+    let fingerprint = core_engine::video_runtime::inspect_options_fingerprint(
+        cookie,
+        referer,
+        user_agent,
+        proxy_url,
+        auth_username,
+        auth_password,
+    );
+    let app_clone = app.clone();
+    let url_owned = url.to_string();
+    let cookie_owned = cookie.map(String::from);
+    let referer_owned = referer.map(String::from);
+    let ua_owned = user_agent.map(String::from);
+    let proxy_owned = proxy_url.map(String::from);
+    let auth_user_owned = auth_username.map(String::from);
+    let auth_pass_owned = auth_password.map(String::from);
+
+    video_inspect_coordinator()
+        .get_or_inspect(url, &fingerprint, move || async move {
+            let is_yt = is_youtube_url(&url_owned);
+            let has_custom_headers = cookie_owned.is_some() || ua_owned.is_some();
+
+            let primary_raw = android_bridge::android_ytdlp_inspect(
+                &app_clone,
+                &url_owned,
+                cookie_owned.as_deref(),
+                referer_owned.as_deref(),
+                ua_owned.as_deref(),
+                proxy_owned.as_deref(),
+                auth_user_owned.as_deref(),
+                auth_pass_owned.as_deref(),
+                None,
+            )
+            .await
+            .and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .map_err(|e| format!("Metadata yt-dlp tidak valid: {}", e))
+            });
+
+            let json_val = match primary_raw {
+                Ok(v) if !is_yt || json_has_playable_video_format(&v) => v,
+                Err(c_err) if !is_yt && !has_custom_headers => {
+                    return Err(c_err);
+                }
+                fallback_candidate => {
+                    let fb_args =
+                        is_yt.then(|| core_engine::video_runtime::youtube_fallback_extractor_args());
+                    let retry = android_bridge::android_ytdlp_inspect(
+                        &app_clone,
+                        &url_owned,
+                        None,
+                        referer_owned.as_deref(),
+                        None,
+                        proxy_owned.as_deref(),
+                        auth_user_owned.as_deref(),
+                        auth_pass_owned.as_deref(),
+                        fb_args,
+                    )
+                    .await
+                    .and_then(|raw| {
+                        serde_json::from_str::<serde_json::Value>(&raw)
+                            .map_err(|e| format!("Metadata yt-dlp tidak valid: {}", e))
+                    });
+
+                    match (retry, fallback_candidate) {
+                        (Ok(r), Ok(c)) => {
+                            if json_has_playable_video_format(&r) || !json_has_playable_video_format(&c) {
+                                r
+                            } else {
+                                c
+                            }
+                        }
+                        (Ok(r), Err(_)) => r,
+                        (Err(_), Ok(c)) => c,
+                        (Err(r_err), Err(c_err)) => {
+                            return Err(if !r_err.is_empty() { r_err } else { c_err });
+                        }
+                    }
+                }
+            };
+
+            let result = build_inspect_result_from_ytdlp_json(&url_owned, &json_val)?;
+            let raw_key = raw_video_cache_key(
+                &url_owned,
+                cookie_owned.as_deref(),
+                referer_owned.as_deref(),
+                ua_owned.as_deref(),
+                proxy_owned.as_deref(),
+                auth_user_owned.as_deref(),
+                auth_pass_owned.as_deref(),
+            );
+            put_cached_raw_ytdlp_json(&raw_key, &json_val);
+            Ok(result)
+        })
+        .await
+}
+
+fn build_inspect_result_from_ytdlp_json(
+    url: &str,
+    json_val: &serde_json::Value,
+) -> Result<InspectResult, String> {
+    let effective_json = if json_val["formats"]
+        .as_array()
+        .map_or(true, |a| a.is_empty())
+    {
+        json_val["entries"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .unwrap_or(json_val)
+    } else {
+        json_val
+    };
+
+    let raw_title = effective_json["title"]
+        .as_str()
+        .or_else(|| json_val["title"].as_str())
+        .unwrap_or("video");
     let clean_title = sanitize_media_title(raw_title, "video");
 
-    let duration_seconds = json_val["duration"].as_u64().unwrap_or(0);
-    let thumbnail_url = json_val["thumbnail"].as_str().map(|s| s.to_string());
+    let duration_seconds = effective_json["duration"]
+        .as_u64()
+        .or_else(|| {
+            effective_json["duration"]
+                .as_f64()
+                .map(|d| d.max(0.0).round() as u64)
+        })
+        .or_else(|| json_val["duration"].as_u64())
+        .unwrap_or(0);
+    let thumbnail_url = effective_json["thumbnail"]
+        .as_str()
+        .or_else(|| json_val["thumbnail"].as_str())
+        .map(|s| s.to_string());
 
-    let formats_array = json_val["formats"]
-        .as_array()
-        .filter(|a| !a.is_empty())
-        .ok_or_else(|| "Daftar format video tidak ditemukan pada tautan ini.".to_string())?;
+    let synthesized_fallback: Vec<serde_json::Value>;
+    let formats_array: &[serde_json::Value] = match effective_json["formats"].as_array() {
+        Some(arr) if !arr.is_empty() => arr.as_slice(),
+        _ => {
+            if let Some(direct_u) = effective_json["url"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+            {
+                synthesized_fallback = vec![serde_json::json!({
+                    "url": direct_u,
+                    "ext": effective_json["ext"].as_str().unwrap_or("mp4"),
+                    "vcodec": effective_json["vcodec"].as_str().unwrap_or("h264"),
+                    "acodec": effective_json["acodec"].as_str().unwrap_or("aac"),
+                    "height": effective_json["height"].as_u64(),
+                    "filesize": effective_json["filesize"].as_u64(),
+                    "filesize_approx": effective_json["filesize_approx"].as_u64(),
+                })];
+                synthesized_fallback.as_slice()
+            } else {
+                return Err("Daftar format video tidak ditemukan pada tautan ini.".to_string());
+            }
+        }
+    };
 
     // 1. Identify best audio stream
     let mut best_audio_size: u64 = 0;
@@ -2173,6 +2352,28 @@ async fn inspect_video_url_uncached(
         });
     }
 
+    if video_formats.is_empty() {
+        let fallback_entry = formats_array
+            .iter()
+            .find(|f| f["ext"].as_str() == Some("mp4") && f["vcodec"].as_str().unwrap_or("h264") != "none")
+            .or_else(|| formats_array.iter().find(|f| f["ext"].as_str() != Some("mhtml")))
+            .unwrap_or(&formats_array[0]);
+        let fallback_size = fallback_entry["filesize"]
+            .as_u64()
+            .or_else(|| fallback_entry["filesize_approx"].as_u64())
+            .filter(|&s| s > 0);
+        video_formats.push(VideoFormat {
+            format_id: "best_mp4".to_string(),
+            resolution: "Best Quality (MP4)".to_string(),
+            extension: "mp4".to_string(),
+            file_size_approx: fallback_size,
+            video_codec: Some(fallback_entry["vcodec"].as_str().unwrap_or("H.264 / AVC").to_string()),
+            audio_codec: Some(fallback_entry["acodec"].as_str().unwrap_or("AAC / Audio Merged").to_string()),
+            download_url: url.to_string(),
+            is_audio_only: false,
+        });
+    }
+
     // 3. Add real Audio formats (MP3 & M4A)
     video_formats.push(VideoFormat {
         format_id: "audio_mp3".to_string(),
@@ -2199,17 +2400,6 @@ async fn inspect_video_url_uncached(
     }
 
     let top_size = video_formats.first().and_then(|f| f.file_size_approx);
-
-    let raw_key = raw_video_cache_key(
-        url,
-        cookie,
-        referer,
-        user_agent,
-        proxy_url,
-        auth_username,
-        auth_password,
-    );
-    put_cached_raw_ytdlp_json(&raw_key, &json_val);
 
     Ok(InspectResult {
         url: url.to_string(),
@@ -4181,20 +4371,211 @@ async fn start_real_download_with_controller(
         if is_video_or_stream {
             #[cfg(target_os = "android")]
             {
-                unregister_active_download(&task_id);
-                remove_task_target(&task_id);
+                let target_ext = target
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or_else(|| "mp4".to_string());
+                let is_audio = matches!(target_ext.as_str(), "mp3" | "m4a" | "flac" | "wav")
+                    || matches!(format_id.as_deref(), Some("audio_mp3") | Some("audio_m4a"));
+                let fmt_selector = build_ytdlp_format_selector_with_strict(
+                    format_id.as_deref(),
+                    &target_ext,
+                    is_audio,
+                    true,
+                    false,
+                );
+                let android_title = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Download Cepat".to_string());
+
                 emit_simple_telemetry(
                     &app,
                     &task_id,
                     0,
                     0,
                     0,
-                    0.0,
+                    2.0,
                     None,
-                    "error",
+                    "downloading",
                     &target,
-                    Some("ANDROID_VIDEO_PHASE2: Ekstraktor video sosial (yt-dlp/FFmpeg) akan hadir di Fase 2 Android. Saat ini mendukung file HTTP/HTTPS, direct video, FTP, dan BitTorrent/Magnet.".to_string()),
+                    None,
                 );
+                android_runtime::upsert_and_sync(
+                    &app,
+                    &task_id,
+                    android_runtime::FgsTaskSnapshot {
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        speed_bytes_per_sec: 0,
+                        progress_percent: 2.0,
+                        title: android_title.clone(),
+                    },
+                    true,
+                );
+
+                let app_for_cancel = app.clone();
+                let tid_for_cancel = task_id.clone();
+                let ctrl_for_watch = http_ctrl.clone();
+                let cancel_watcher = tokio::spawn(async move {
+                    ctrl_for_watch.notified().await;
+                    let _ =
+                        android_bridge::android_ytdlp_cancel(&app_for_cancel, &tid_for_cancel)
+                            .await;
+                });
+
+                let dl_params = android_bridge::AndroidYtdlpDownloadParams {
+                    task_id: task_id.clone(),
+                    url: url.clone(),
+                    output_path: target.display().to_string(),
+                    format_selector: fmt_selector.clone(),
+                    is_audio,
+                    target_ext: target_ext.clone(),
+                    connections: effective_connections.min(16),
+                    speed_limit_kbs: speed_limit_kbs.unwrap_or(0),
+                    cookie: cookie.clone(),
+                    referer: referer.clone(),
+                    user_agent: user_agent.clone(),
+                    proxy_url: proxy_url.clone(),
+                    auth_username: auth_username.clone(),
+                    auth_password: auth_password.clone(),
+                    youtube_extractor_args: None,
+                };
+
+                let primary_dl =
+                    android_bridge::android_ytdlp_download(&app, dl_params.clone()).await;
+
+                let dl_result = match primary_dl {
+                    Ok(res) => Ok(res),
+                    Err(err_msg)
+                        if !http_ctrl.is_stopped()
+                            && is_youtube_url(&url)
+                            && (cookie.is_some() || user_agent.is_some()) =>
+                    {
+                        log::warn!(
+                            "Android yt-dlp retry without custom cookies/UA for {}: {}",
+                            url,
+                            err_msg
+                        );
+                        let mut retry_params = dl_params;
+                        retry_params.cookie = None;
+                        retry_params.user_agent = None;
+                        retry_params.youtube_extractor_args = Some(
+                            core_engine::video_runtime::youtube_fallback_extractor_args()
+                                .to_string(),
+                        );
+                        android_bridge::android_ytdlp_download(&app, retry_params).await
+                    }
+                    Err(err_msg) => Err(err_msg),
+                };
+
+                cancel_watcher.abort();
+                unregister_active_download(&task_id);
+                android_runtime::remove_and_sync(&app, &task_id);
+
+                if http_ctrl.is_canceled() {
+                    remove_task_target(&task_id);
+                    cleanup_download_artifacts(&target);
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                    );
+                    return;
+                }
+                if http_ctrl.is_paused() {
+                    emit_simple_telemetry(
+                        &app, &task_id, 0, 0, 0, 0.0, None, "paused", &target, None,
+                    );
+                    return;
+                }
+
+                match dl_result {
+                    Ok(res) if res.canceled => {
+                        remove_task_target(&task_id);
+                        cleanup_download_artifacts(&target);
+                        emit_simple_telemetry(
+                            &app, &task_id, 0, 0, 0, 0.0, None, "canceled", &target, None,
+                        );
+                    }
+                    Ok(res) => {
+                        let produced_path = if !res.file_path.trim().is_empty() {
+                            PathBuf::from(&res.file_path)
+                        } else {
+                            target.clone()
+                        };
+                        let file_len = if res.file_size > 0 {
+                            res.file_size
+                        } else {
+                            std::fs::metadata(&produced_path)
+                                .ok()
+                                .filter(|m| m.is_file())
+                                .map(|m| m.len())
+                                .unwrap_or(0)
+                        };
+                        remove_task_target(&task_id);
+                        if file_len == 0 {
+                            emit_simple_telemetry(
+                                &app,
+                                &task_id,
+                                0,
+                                0,
+                                0,
+                                0.0,
+                                None,
+                                "error",
+                                &target,
+                                Some(
+                                    "Berkas hasil unduhan video/audio kosong atau tidak tersimpan ke disk."
+                                        .to_string(),
+                                ),
+                            );
+                        } else {
+                            let final_dest = match android_runtime::export_completed_target(
+                                &app,
+                                &produced_path,
+                            )
+                            .await
+                            {
+                                Ok(exported_path) => PathBuf::from(exported_path),
+                                Err(export_err) => {
+                                    log::warn!(
+                                        "MediaStore export failed for {}, keeping staging path: {}",
+                                        produced_path.display(),
+                                        export_err
+                                    );
+                                    produced_path
+                                }
+                            };
+                            emit_simple_telemetry(
+                                &app,
+                                &task_id,
+                                file_len,
+                                file_len,
+                                0,
+                                100.0,
+                                Some(0),
+                                "completed",
+                                &final_dest,
+                                None,
+                            );
+                        }
+                    }
+                    Err(err_msg) => {
+                        remove_task_target(&task_id);
+                        emit_simple_telemetry(
+                            &app,
+                            &task_id,
+                            0,
+                            0,
+                            0,
+                            0.0,
+                            None,
+                            "error",
+                            &target,
+                            Some(err_msg),
+                        );
+                    }
+                }
                 return;
             }
 
@@ -5215,6 +5596,7 @@ fn ensure_file_created(destination_path: String, _file_name: String) -> Result<S
 
 #[tauri::command]
 async fn inspect_url(
+    app: tauri::AppHandle,
     url: String,
     cookie: Option<String>,
     referer: Option<String>,
@@ -5244,24 +5626,45 @@ async fn inspect_url(
     if is_video_or_stream_url(&url) {
         #[cfg(target_os = "android")]
         {
-            return Err("ANDROID_VIDEO_PHASE2: Ekstraktor video sosial (yt-dlp/FFmpeg) akan hadir di Fase 2 Android. Saat ini mendukung file HTTP/HTTPS, direct video, FTP, dan BitTorrent/Magnet.".to_string());
+            match inspect_video_url_android(
+                &app,
+                &url,
+                cookie.as_deref(),
+                referer.as_deref(),
+                user_agent.as_deref(),
+                proxy_url.as_deref(),
+                auth_username.as_deref(),
+                auth_password.as_deref(),
+            )
+            .await
+            {
+                Ok(res) => return Ok(res),
+                Err(err) => {
+                    if !is_direct_manifest_url(&url) {
+                        return Err(err);
+                    }
+                }
+            }
         }
         #[cfg(not(target_os = "android"))]
-        match inspect_video_url_with_options(
-            &url,
-            cookie.as_deref(),
-            referer.as_deref(),
-            user_agent.as_deref(),
-            proxy_url.as_deref(),
-            auth_username.as_deref(),
-            auth_password.as_deref(),
-        )
-        .await
         {
-            Ok(res) => return Ok(res),
-            Err(err) => {
-                if !is_direct_manifest_url(&url) {
-                    return Err(err);
+            let _ = &app;
+            match inspect_video_url_with_options(
+                &url,
+                cookie.as_deref(),
+                referer.as_deref(),
+                user_agent.as_deref(),
+                proxy_url.as_deref(),
+                auth_username.as_deref(),
+                auth_password.as_deref(),
+            )
+            .await
+            {
+                Ok(res) => return Ok(res),
+                Err(err) => {
+                    if !is_direct_manifest_url(&url) {
+                        return Err(err);
+                    }
                 }
             }
         }
@@ -8030,6 +8433,7 @@ async fn start_popup_pre_download_internal(
         if is_video_or_stream_url(&url) || core_engine::torrent::is_torrent_reference(&url) {
             let inspect_res = tokio::select! {
                 res = inspect_url(
+                    app_clone.clone(),
                     url.clone(),
                     cookie.clone(),
                     referer.clone(),
@@ -9613,6 +10017,70 @@ pub fn run() {
                     let _ = stop_all_real_downloads();
                     android_runtime::clear_and_sync(&app_for_pause);
                 });
+
+                let app_for_ytdlp = app.handle().clone();
+                android_bridge::set_ytdlp_progress_handler(move |prog| {
+                    let still_active = active_downloads()
+                        .lock()
+                        .map(|m| m.contains_key(&prog.task_id))
+                        .unwrap_or(false);
+                    if !still_active {
+                        return;
+                    }
+
+                    let target = task_targets()
+                        .lock()
+                        .ok()
+                        .and_then(|map| map.get(&prog.task_id).cloned())
+                        .unwrap_or_else(|| PathBuf::from(&prog.task_id));
+
+                    let (pct, dl, total, speed, eta) =
+                        if let Some((p, d, t, s, e)) = parse_ytdlp_progress_line(&prog.line) {
+                            (p.clamp(0.0, 99.5), d, t, s, e.or(prog.eta_seconds))
+                        } else if prog.progress.is_finite() && prog.progress >= 0.0 {
+                            (
+                                prog.progress.clamp(0.0, 99.5),
+                                0,
+                                0,
+                                0,
+                                prog.eta_seconds,
+                            )
+                        } else {
+                            return;
+                        };
+
+                    let title = target
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Download Cepat")
+                        .to_string();
+
+                    android_runtime::upsert_and_sync(
+                        &app_for_ytdlp,
+                        &prog.task_id,
+                        android_runtime::FgsTaskSnapshot {
+                            downloaded_bytes: dl,
+                            total_bytes: total,
+                            speed_bytes_per_sec: speed,
+                            progress_percent: pct,
+                            title,
+                        },
+                        false,
+                    );
+
+                    emit_simple_telemetry(
+                        &app_for_ytdlp,
+                        &prog.task_id,
+                        dl,
+                        total,
+                        speed,
+                        pct,
+                        eta,
+                        "downloading",
+                        &target,
+                        None,
+                    );
+                });
             }
 
             let _ = cleanup_stale_prebuffer_dir();
@@ -10405,5 +10873,106 @@ mod tests {
         assert!(!p_other.exists());
 
         let _ = std::fs::remove_dir_all(&pre_dir);
+    }
+
+    #[test]
+    fn test_build_inspect_result_from_ytdlp_json_instagram_and_youtube() {
+        // 1. Standard multi-resolution YouTube JSON
+        let yt_json = serde_json::json!({
+            "title": "Sample: Video / Demo?",
+            "duration": 19,
+            "thumbnail": "https://img.youtube.com/vi/abc/hqdefault.jpg",
+            "formats": [
+                {
+                    "format_id": "137",
+                    "ext": "mp4",
+                    "vcodec": "avc1.640028",
+                    "acodec": "none",
+                    "height": 1080,
+                    "filesize": 12_000_000u64
+                },
+                {
+                    "format_id": "136",
+                    "ext": "mp4",
+                    "vcodec": "avc1.4d401f",
+                    "acodec": "none",
+                    "height": 720,
+                    "filesize": 6_000_000u64
+                },
+                {
+                    "format_id": "140",
+                    "ext": "m4a",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                    "filesize": 500_000u64
+                }
+            ]
+        });
+        let yt_res = build_inspect_result_from_ytdlp_json(
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            &yt_json,
+        )
+        .expect("youtube json should inspect");
+        let yt_media = yt_res.media_info.expect("youtube media_info");
+        assert!(!yt_media.title.contains(':'));
+        assert!(!yt_media.title.contains('/'));
+        assert_eq!(yt_media.duration_seconds, Some(19));
+        let yt_ids: Vec<&str> = yt_media
+            .formats
+            .iter()
+            .map(|f| f.format_id.as_str())
+            .collect();
+        assert!(yt_ids.contains(&"1080p_mp4"));
+        assert!(yt_ids.contains(&"720p_mp4"));
+        assert!(yt_ids.contains(&"audio_mp3"));
+        assert!(yt_ids.contains(&"audio_m4a"));
+
+        // 2. Instagram carousel JSON with empty top-level formats and float duration in entries[0]
+        let ig_carousel = serde_json::json!({
+            "title": "IG Carousel Post",
+            "formats": [],
+            "entries": [
+                {
+                    "title": "IG Slide 1",
+                    "duration": 14.6,
+                    "url": "https://scontent.cdninstagram.com/v/slide1.mp4",
+                    "ext": "mp4",
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "height": 1080,
+                    "filesize": 4_200_000u64
+                }
+            ]
+        });
+        let ig_res = build_inspect_result_from_ytdlp_json(
+            "https://www.instagram.com/p/C_test123/",
+            &ig_carousel,
+        )
+        .expect("instagram carousel should inspect");
+        let ig_media = ig_res.media_info.expect("ig media_info");
+        assert_eq!(ig_media.title, "IG Slide 1");
+        assert_eq!(ig_media.duration_seconds, Some(15));
+        assert!(ig_media.formats.iter().any(|f| f.format_id == "1080p_mp4"));
+
+        // 3. Single-stream JSON without formats array and without height
+        let single_stream = serde_json::json!({
+            "title": "Single Stream Reel",
+            "url": "https://video.example.com/stream.mp4",
+            "ext": "mp4",
+            "filesize": 2_500_000u64
+        });
+        let single_res = build_inspect_result_from_ytdlp_json(
+            "https://www.instagram.com/reel/C_single/",
+            &single_stream,
+        )
+        .expect("single stream should inspect");
+        let single_media = single_res.media_info.expect("single media_info");
+        let single_ids: Vec<&str> = single_media
+            .formats
+            .iter()
+            .map(|f| f.format_id.as_str())
+            .collect();
+        assert!(single_ids.contains(&"best_mp4"));
+        assert!(single_ids.contains(&"audio_mp3"));
     }
 }

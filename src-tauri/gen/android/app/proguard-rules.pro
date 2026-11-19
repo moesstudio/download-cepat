@@ -28,3 +28,15 @@
 -keep class com.moesstudio.downloadcepat.DownloadBridgePlugin$* { *; }
 -keep class com.moesstudio.downloadcepat.DownloadForegroundService { *; }
 -keep class com.moesstudio.downloadcepat.DownloadForegroundService$* { *; }
+
+# Keep youtubedl-android, ffmpeg, Jackson, and Apache Commons reflection across R8 optimization
+-keep class com.yausername.youtubedl_android.** { *; }
+-keep class com.yausername.ffmpeg.** { *; }
+-keep class com.yausername.youtubedl_common.** { *; }
+-keep class com.fasterxml.jackson.** { *; }
+-keep class org.apache.commons.** { *; }
+-dontwarn java.beans.ConstructorProperties
+-dontwarn java.beans.Transient
+-dontwarn org.apache.commons.**
+-dontwarn org.tukaani.**
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod

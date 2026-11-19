@@ -26,8 +26,72 @@ pub struct AndroidExportEntry {
     pub display_path: String,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct AndroidYtdlpProgress {
+    pub task_id: String,
+    pub progress: f64,
+    pub eta_seconds: Option<u64>,
+    pub line: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidYtdlpDownloadParams {
+    pub task_id: String,
+    pub url: String,
+    pub output_path: String,
+    pub format_selector: String,
+    pub is_audio: bool,
+    pub target_ext: String,
+    pub connections: usize,
+    pub speed_limit_kbs: u64,
+    pub cookie: Option<String>,
+    pub referer: Option<String>,
+    pub user_agent: Option<String>,
+    pub proxy_url: Option<String>,
+    pub auth_username: Option<String>,
+    pub auth_password: Option<String>,
+    pub youtube_extractor_args: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidYtdlpDownloadResult {
+    pub canceled: bool,
+    pub file_path: String,
+    pub file_size: u64,
+}
+
 static PENDING_INTENTS: OnceLock<Mutex<Vec<AndroidIncomingIntent>>> = OnceLock::new();
 static PAUSE_ALL_HANDLER: OnceLock<Mutex<Option<Box<dyn Fn() + Send + Sync>>>> = OnceLock::new();
+static YTDLP_PROGRESS_HANDLER: OnceLock<
+    Mutex<Option<Box<dyn Fn(AndroidYtdlpProgress) + Send + Sync>>>,
+> = OnceLock::new();
+
+#[allow(dead_code)]
+pub fn set_ytdlp_progress_handler<F>(handler: F)
+where
+    F: Fn(AndroidYtdlpProgress) + Send + Sync + 'static,
+{
+    let store = YTDLP_PROGRESS_HANDLER.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = store.lock() {
+        *guard = Some(Box::new(handler));
+    }
+}
+
+#[allow(dead_code)]
+fn dispatch_ytdlp_progress(prog: AndroidYtdlpProgress) {
+    if let Some(store) = YTDLP_PROGRESS_HANDLER.get() {
+        if let Ok(guard) = store.lock() {
+            if let Some(ref f) = *guard {
+                f(prog);
+            }
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub fn set_pause_all_handler<F>(handler: F)
@@ -176,6 +240,36 @@ mod platform {
                             "android-notification-action",
                             serde_json::json!({ "action": action }),
                         );
+                    }
+                    Some("ytdlp_progress") => {
+                        let task_id = val
+                            .get("taskId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !task_id.is_empty() {
+                            let progress = val
+                                .get("progress")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(-1.0);
+                            let eta_seconds = val
+                                .get("etaSeconds")
+                                .and_then(|v| v.as_i64())
+                                .filter(|&n| n >= 0)
+                                .map(|n| n as u64);
+                            let line = val
+                                .get("line")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            dispatch_ytdlp_progress(AndroidYtdlpProgress {
+                                task_id,
+                                progress,
+                                eta_seconds,
+                                line,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -381,6 +475,86 @@ mod platform {
             .map_err(|e| format!("{}", e))?;
         Ok(resp.text)
     }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct YtdlpJsonResponse {
+        json: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct YtdlpCancelResponse {
+        #[serde(default)]
+        destroyed: bool,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn android_ytdlp_inspect<R: Runtime>(
+        app: &AppHandle<R>,
+        url: &str,
+        cookie: Option<&str>,
+        referer: Option<&str>,
+        user_agent: Option<&str>,
+        proxy_url: Option<&str>,
+        auth_username: Option<&str>,
+        auth_password: Option<&str>,
+        youtube_extractor_args: Option<&str>,
+    ) -> Result<String, String> {
+        let state = app
+            .try_state::<AndroidBridgeState<R>>()
+            .ok_or_else(|| "AndroidBridgeState unavailable".to_string())?;
+        let resp: YtdlpJsonResponse = state
+            .handle
+            .run_mobile_plugin_async(
+                "ytdlpInspect",
+                serde_json::json!({
+                    "url": url,
+                    "cookie": cookie,
+                    "referer": referer,
+                    "userAgent": user_agent,
+                    "proxyUrl": proxy_url,
+                    "authUsername": auth_username,
+                    "authPassword": auth_password,
+                    "youtubeExtractorArgs": youtube_extractor_args,
+                }),
+            )
+            .await
+            .map_err(|e| format!("{}", e))?;
+        Ok(resp.json)
+    }
+
+    pub async fn android_ytdlp_download<R: Runtime>(
+        app: &AppHandle<R>,
+        params: AndroidYtdlpDownloadParams,
+    ) -> Result<AndroidYtdlpDownloadResult, String> {
+        let state = app
+            .try_state::<AndroidBridgeState<R>>()
+            .ok_or_else(|| "AndroidBridgeState unavailable".to_string())?;
+        state
+            .handle
+            .run_mobile_plugin_async::<AndroidYtdlpDownloadResult>("ytdlpDownload", params)
+            .await
+            .map_err(|e| format!("{}", e))
+    }
+
+    pub async fn android_ytdlp_cancel<R: Runtime>(
+        app: &AppHandle<R>,
+        task_id: &str,
+    ) -> Result<bool, String> {
+        let Some(state) = app.try_state::<AndroidBridgeState<R>>() else {
+            return Ok(false);
+        };
+        let resp: YtdlpCancelResponse = state
+            .handle
+            .run_mobile_plugin_async(
+                "ytdlpCancel",
+                serde_json::json!({ "taskId": task_id }),
+            )
+            .await
+            .map_err(|e| format!("{}", e))?;
+        Ok(resp.destroyed)
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -461,10 +635,40 @@ mod platform {
     pub async fn read_clipboard_text<R: Runtime>(_app: &AppHandle<R>) -> Result<String, String> {
         Ok(String::new())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn android_ytdlp_inspect<R: Runtime>(
+        _app: &AppHandle<R>,
+        _url: &str,
+        _cookie: Option<&str>,
+        _referer: Option<&str>,
+        _user_agent: Option<&str>,
+        _proxy_url: Option<&str>,
+        _auth_username: Option<&str>,
+        _auth_password: Option<&str>,
+        _youtube_extractor_args: Option<&str>,
+    ) -> Result<String, String> {
+        Err("android_ytdlp_inspect is only supported on Android".to_string())
+    }
+
+    pub async fn android_ytdlp_download<R: Runtime>(
+        _app: &AppHandle<R>,
+        _params: AndroidYtdlpDownloadParams,
+    ) -> Result<AndroidYtdlpDownloadResult, String> {
+        Err("android_ytdlp_download is only supported on Android".to_string())
+    }
+
+    pub async fn android_ytdlp_cancel<R: Runtime>(
+        _app: &AppHandle<R>,
+        _task_id: &str,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 #[allow(unused_imports)]
 pub use platform::{
+    android_ytdlp_cancel, android_ytdlp_download, android_ytdlp_inspect,
     compute_content_checksums, consume_pending_intents, export_to_public_downloads, init,
     install_apk_update, open_content_or_file, open_external_url, read_clipboard_text,
     share_content_or_file, update_foreground_service,

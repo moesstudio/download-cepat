@@ -231,8 +231,21 @@ export const AddUrlModal: React.FC<AddUrlModalProps> = ({
       urlLower.includes('vimeo.com') ||
       urlLower.includes('tiktok.com') ||
       urlLower.includes('instagram.com') ||
+      urlLower.includes('instagr.am') ||
+      urlLower.includes('facebook.com') ||
+      urlLower.includes('fb.watch') ||
+      urlLower.includes('fb.com') ||
       urlLower.includes('x.com') ||
       urlLower.includes('twitter.com') ||
+      urlLower.includes('reddit.com') ||
+      urlLower.includes('redd.it') ||
+      urlLower.includes('twitch.tv') ||
+      urlLower.includes('dailymotion.com') ||
+      urlLower.includes('soundcloud.com') ||
+      urlLower.includes('threads.net') ||
+      urlLower.includes('threads.com') ||
+      urlLower.includes('pinterest.com') ||
+      urlLower.includes('pin.it') ||
       urlLower.endsWith('.mp4') ||
       urlLower.endsWith('.mkv') ||
       urlLower.endsWith('.webm') ||

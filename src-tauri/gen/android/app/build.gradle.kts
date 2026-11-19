@@ -56,6 +56,13 @@ android {
         val propVersionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toIntOrNull() ?: 1
         versionCode = maxOf(propVersionCode, computedSemverCode)
         versionName = rawVersionName
+        val requestedAbis = (providers.environmentVariable("ANDROID_ABI_FILTERS").orNull ?: "arm64-v8a,armeabi-v7a")
+            .split(",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        ndk {
+            abiFilters.addAll(requestedAbis)
+        }
     }
     signingConfigs {
         if (hasReleaseSigning) {
@@ -105,6 +112,11 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 kotlin {
@@ -118,6 +130,9 @@ rust {
 }
 
 dependencies {
+    val youtubedlAndroidVersion = "0.18.1"
+    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroidVersion")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroidVersion")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

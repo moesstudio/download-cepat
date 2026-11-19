@@ -28,11 +28,16 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.yausername.ffmpeg.FFmpeg
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLException
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 @InvokeArg
@@ -50,6 +55,41 @@ class DownloadBridgePlugin(private val activity: Activity) : Plugin(activity) {
         private val pendingIntents = mutableListOf<Pair<String, String>>()
         private var notificationPermissionRequested = false
         private val ioExecutor = Executors.newCachedThreadPool()
+        private val ytInitLock = Any()
+        @Volatile
+        private var ytReady = false
+        @Volatile
+        private var ytUpdateAttempted = false
+        private val lastProgressEmitMs = ConcurrentHashMap<String, Long>()
+
+        private fun ensureYoutubeDlReady(context: Context) {
+            if (ytReady) return
+            synchronized(ytInitLock) {
+                if (ytReady) return
+                val appCtx = context.applicationContext
+                YoutubeDL.getInstance().init(appCtx)
+                FFmpeg.getInstance().init(appCtx)
+                ytReady = true
+            }
+        }
+
+        private fun maybeAutoUpdateYtDlp(context: Context) {
+            if (ytUpdateAttempted) return
+            ytUpdateAttempted = true
+            val appCtx = context.applicationContext
+            ensureYoutubeDlReady(appCtx)
+            val prefs = appCtx.getSharedPreferences("dc_ytdlp_prefs", Context.MODE_PRIVATE)
+            val lastMs = prefs.getLong("last_ytdlp_update_ms", 0L)
+            val nowMs = System.currentTimeMillis()
+            if (nowMs - lastMs >= 86_400_000L) {
+                try {
+                    YoutubeDL.getInstance().updateYoutubeDL(appCtx, YoutubeDL.UpdateChannel._STABLE)
+                    prefs.edit().putLong("last_ytdlp_update_ms", nowMs).apply()
+                } catch (t: Throwable) {
+                    android.util.Log.w("DownloadBridgePlugin", "yt-dlp auto-update skipped", t)
+                }
+            }
+        }
 
         fun handleIncomingIntent(context: Context, intent: Intent?) {
             if (intent == null) return
@@ -152,11 +192,55 @@ class DownloadBridgePlugin(private val activity: Activity) : Plugin(activity) {
             }
             ch.send(payload)
         }
+
+        fun emitYtdlpProgress(taskId: String, progress: Float, etaSeconds: Long, line: String) {
+            val now = System.currentTimeMillis()
+            val force = progress >= 99f ||
+                line.contains("[Merger]") ||
+                line.contains("[ExtractAudio]") ||
+                line.contains("[FixupM3u8]")
+            if (!force) {
+                val prev = lastProgressEmitMs[taskId] ?: 0L
+                if (now - prev < 250L) return
+            }
+            lastProgressEmitMs[taskId] = now
+            val ch = synchronized(lock) { eventChannel } ?: return
+            val safePct = if (progress.isFinite() && progress >= 0f) {
+                progress.toDouble().coerceIn(0.0, 100.0)
+            } else {
+                -1.0
+            }
+            val payload = JSObject().apply {
+                put("event", "ytdlp_progress")
+                put("taskId", taskId)
+                put("progress", safePct)
+                put("etaSeconds", if (etaSeconds >= 0L) etaSeconds else -1L)
+                put("line", line)
+            }
+            ch.send(payload)
+        }
+
+        private fun extractCleanYtDlpError(rawErr: String?, fallback: String): String {
+            val lines = (rawErr ?: "")
+                .lines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            return lines.lastOrNull { it.startsWith("ERROR:") }
+                ?: lines.lastOrNull { !it.startsWith("WARNING:") }
+                ?: fallback
+        }
     }
 
     override fun load(webView: WebView) {
         super.load(webView)
         handleIncomingIntent(activity, activity.intent)
+        ioExecutor.execute {
+            try {
+                maybeAutoUpdateYtDlp(activity.applicationContext)
+            } catch (t: Throwable) {
+                android.util.Log.w("DownloadBridgePlugin", "yt-dlp warmup/update failed", t)
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -557,6 +641,246 @@ class DownloadBridgePlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.resolve(JSObject().apply { put("text", "") })
             }
         }
+    }
+
+    @Command
+    fun ytdlpInspect(invoke: Invoke) {
+        val args = invoke.getArgs()
+        val url = args.getString("url", "")?.trim() ?: ""
+        if (url.isEmpty()) {
+            invoke.reject("URL cannot be empty")
+            return
+        }
+        val cookie = args.getString("cookie", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val referer = args.getString("referer", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val userAgent = args.getString("userAgent", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val proxyUrl = args.getString("proxyUrl", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val authUsername = args.getString("authUsername", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val authPassword = args.getString("authPassword", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val youtubeExtractorArgs =
+            args.getString("youtubeExtractorArgs", null)?.trim()?.takeIf { it.isNotEmpty() }
+
+        ioExecutor.execute {
+            try {
+                ensureYoutubeDlReady(activity.applicationContext)
+                val request = YoutubeDLRequest(url).apply {
+                    addOption("--dump-single-json")
+                    addOption("--no-playlist")
+                    addOption("--no-warnings")
+                    addOption("--no-check-formats")
+                    if (youtubeExtractorArgs != null) {
+                        addOption("--extractor-args", youtubeExtractorArgs)
+                    }
+                    if (userAgent != null) {
+                        addOption("--user-agent", userAgent)
+                    }
+                    if (referer != null) {
+                        addOption("--referer", referer)
+                    }
+                    if (cookie != null) {
+                        addOption("--add-header", "Cookie: $cookie")
+                    }
+                    if (proxyUrl != null) {
+                        addOption("--proxy", proxyUrl)
+                    }
+                    if (authUsername != null && authPassword != null) {
+                        addOption("--username", authUsername)
+                        addOption("--password", authPassword)
+                    }
+                }
+                val processId = "inspect_${UUID.randomUUID()}"
+                val response = YoutubeDL.getInstance().execute(request, processId)
+                val out = response.out.trim()
+                if (out.isEmpty()) {
+                    invoke.reject(extractCleanYtDlpError(response.err, "Video stream cannot be inspected."))
+                } else {
+                    invoke.resolve(JSObject().apply { put("json", out) })
+                }
+            } catch (e: YoutubeDLException) {
+                invoke.reject(extractCleanYtDlpError(e.message, "yt-dlp inspect failed"))
+            } catch (e: Exception) {
+                invoke.reject(extractCleanYtDlpError(e.message, "yt-dlp inspect error: ${e.message}"))
+            } catch (t: Throwable) {
+                android.util.Log.e("DownloadBridgePlugin", "Fatal error inspecting media via yt-dlp", t)
+                invoke.reject(extractCleanYtDlpError(t.message, "yt-dlp inspect error: ${t.javaClass.simpleName}: ${t.message}"))
+            }
+        }
+    }
+
+    @Command
+    fun ytdlpDownload(invoke: Invoke) {
+        val args = invoke.getArgs()
+        val taskId = args.getString("taskId", "")?.trim() ?: ""
+        val url = args.getString("url", "")?.trim() ?: ""
+        val outputPath = args.getString("outputPath", "")?.trim() ?: ""
+        if (taskId.isEmpty() || url.isEmpty() || outputPath.isEmpty()) {
+            invoke.reject("Missing taskId, url, or outputPath")
+            return
+        }
+        val formatSelector = args.getString("formatSelector", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val isAudio = args.getBoolean("isAudio", false)
+        val targetExt = args.getString("targetExt", "mp4")?.trim()?.lowercase() ?: "mp4"
+        val connections = args.getInteger("connections", 1).coerceIn(1, 16)
+        val speedLimitKbs = args.optLong("speedLimitKbs", 0L).coerceAtLeast(0L)
+        val cookie = args.getString("cookie", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val referer = args.getString("referer", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val userAgent = args.getString("userAgent", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val proxyUrl = args.getString("proxyUrl", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val authUsername = args.getString("authUsername", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val authPassword = args.getString("authPassword", null)?.trim()?.takeIf { it.isNotEmpty() }
+        val youtubeExtractorArgs =
+            args.getString("youtubeExtractorArgs", null)?.trim()?.takeIf { it.isNotEmpty() }
+
+        ioExecutor.execute {
+            try {
+                ensureYoutubeDlReady(activity.applicationContext)
+                val targetFile = File(outputPath)
+                val parentDir = targetFile.parentFile ?: activity.filesDir
+                if (!parentDir.exists()) parentDir.mkdirs()
+
+                val rawStem = targetFile.nameWithoutExtension.ifBlank { "video_${System.currentTimeMillis()}" }
+                val escapedStem = rawStem.replace("%", "%%")
+                val outputTemplate = File(parentDir, "$escapedStem.%(ext)s").absolutePath
+
+                val effectiveSelector = formatSelector
+                    ?: if (isAudio) "bestaudio/best" else "bestvideo+bestaudio/best"
+
+                val request = YoutubeDLRequest(url).apply {
+                    addOption("--no-playlist")
+                    addOption("--newline")
+                    addOption("--no-mtime")
+                    addOption("--continue")
+                    addOption("-f", effectiveSelector)
+                    if (connections > 1) {
+                        addOption("-N", connections)
+                    }
+                    if (speedLimitKbs > 0L) {
+                        addOption("--limit-rate", "${speedLimitKbs}K")
+                    }
+                    if (youtubeExtractorArgs != null) {
+                        addOption("--extractor-args", youtubeExtractorArgs)
+                    }
+                    if (userAgent != null) {
+                        addOption("--user-agent", userAgent)
+                    }
+                    if (referer != null) {
+                        addOption("--referer", referer)
+                    }
+                    if (cookie != null) {
+                        addOption("--add-header", "Cookie: $cookie")
+                    }
+                    if (proxyUrl != null) {
+                        addOption("--proxy", proxyUrl)
+                    }
+                    if (authUsername != null && authPassword != null) {
+                        addOption("--username", authUsername)
+                        addOption("--password", authPassword)
+                    }
+                    if (isAudio) {
+                        val audioFmt = if (targetExt in setOf("mp3", "m4a", "flac", "wav")) {
+                            targetExt
+                        } else {
+                            "mp3"
+                        }
+                        addOption("-x")
+                        addOption("--audio-format", audioFmt)
+                        addOption("--audio-quality", "0")
+                    } else {
+                        val mergeFmt = if (targetExt in setOf("mp4", "mkv", "webm")) {
+                            targetExt
+                        } else {
+                            "mp4"
+                        }
+                        addOption("--merge-output-format", mergeFmt)
+                    }
+                    addOption("-o", outputTemplate)
+                }
+
+                val response = YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
+                    emitYtdlpProgress(taskId, progress, etaInSeconds, line)
+                }
+                lastProgressEmitMs.remove(taskId)
+
+                val exactMatch = targetFile.takeIf { it.isFile && it.length() > 0L }
+                val extMatch = File(parentDir, "$rawStem.$targetExt").takeIf { it.isFile && it.length() > 0L }
+                val siblingMatch = parentDir.listFiles()
+                    ?.filter { f ->
+                        f.isFile &&
+                            f.name.startsWith("$rawStem.") &&
+                            !f.name.endsWith(".part") &&
+                            !f.name.endsWith(".ytdl") &&
+                            !f.name.endsWith(".dcmeta") &&
+                            !f.name.endsWith(".tmp") &&
+                            !f.name.endsWith(".temp") &&
+                            f.length() > 0L
+                    }
+                    ?.maxByOrNull { it.lastModified() }
+
+                val produced = exactMatch ?: extMatch ?: siblingMatch
+                if (produced == null) {
+                    invoke.reject(
+                        extractCleanYtDlpError(
+                            response.err,
+                            "Downloaded video/audio file is empty or missing."
+                        )
+                    )
+                    return@execute
+                }
+
+                val finalFile = if (produced.absolutePath != targetFile.absolutePath) {
+                    if (targetFile.exists()) targetFile.delete()
+                    if (produced.renameTo(targetFile)) targetFile else produced
+                } else {
+                    produced
+                }
+
+                invoke.resolve(JSObject().apply {
+                    put("canceled", false)
+                    put("filePath", finalFile.absolutePath)
+                    put("fileSize", finalFile.length())
+                })
+            } catch (_: YoutubeDL.CanceledException) {
+                lastProgressEmitMs.remove(taskId)
+                invoke.resolve(JSObject().apply {
+                    put("canceled", true)
+                    put("filePath", "")
+                    put("fileSize", 0L)
+                })
+            } catch (_: InterruptedException) {
+                lastProgressEmitMs.remove(taskId)
+                invoke.resolve(JSObject().apply {
+                    put("canceled", true)
+                    put("filePath", "")
+                    put("fileSize", 0L)
+                })
+            } catch (e: YoutubeDLException) {
+                lastProgressEmitMs.remove(taskId)
+                invoke.reject(extractCleanYtDlpError(e.message, "yt-dlp download failed"))
+            } catch (e: Exception) {
+                lastProgressEmitMs.remove(taskId)
+                invoke.reject(extractCleanYtDlpError(e.message, "yt-dlp download error: ${e.message}"))
+            } catch (t: Throwable) {
+                lastProgressEmitMs.remove(taskId)
+                android.util.Log.e("DownloadBridgePlugin", "Fatal error downloading media via yt-dlp", t)
+                invoke.reject(extractCleanYtDlpError(t.message, "yt-dlp download error: ${t.javaClass.simpleName}: ${t.message}"))
+            }
+        }
+    }
+
+    @Command
+    fun ytdlpCancel(invoke: Invoke) {
+        val taskId = invoke.getArgs().getString("taskId", "")?.trim() ?: ""
+        val destroyed = if (taskId.isNotEmpty()) {
+            try {
+                YoutubeDL.getInstance().destroyProcessById(taskId)
+            } catch (_: Exception) {
+                false
+            }
+        } else {
+            false
+        }
+        lastProgressEmitMs.remove(taskId)
+        invoke.resolve(JSObject().apply { put("destroyed", destroyed) })
     }
 
     private fun maybeRequestNotificationPermission() {
