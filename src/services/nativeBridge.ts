@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import {
+  AndroidIncomingIntent,
   AppUpdateInfo,
   BuildInfo,
   FileChecksums,
@@ -14,9 +15,14 @@ import {
   UpdateInstallResult,
 } from '../types.ts';
 
-// Check if running inside Tauri native desktop environment
+// Check if running inside Tauri native desktop/mobile environment
 export const isTauri = (): boolean => {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+};
+
+export const isAndroidPlatform = (buildInfo?: BuildInfo | null): boolean => {
+  if (buildInfo?.os === 'android') return true;
+  return typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
 };
 
 export interface NativeHeaders {
@@ -492,7 +498,10 @@ export const inspectTorrentBytes = async (bytes: number[]): Promise<InspectResul
   };
 };
 
-export const openDownloadPopup = async (params: OpenDownloadPopupParams): Promise<string> => {
+export const openDownloadPopup = async (params: OpenDownloadPopupParams): Promise<string | null> => {
+  if (isAndroidPlatform()) {
+    return null;
+  }
   if (isTauri()) {
     return await invoke<string>('open_download_popup', { params });
   }
@@ -677,4 +686,29 @@ export const setTrayLanguage = async (lang: string): Promise<void> => {
       console.warn('Failed to sync tray language:', err);
     }
   }
+};
+
+export const shareDownloadedFile = async (
+  path: string
+): Promise<{ success: boolean; message: string }> => {
+  if (isTauri()) {
+    try {
+      const msg = await invoke<string>('share_downloaded_file', { path });
+      return { success: true, message: msg };
+    } catch (err) {
+      return { success: false, message: String(err) };
+    }
+  }
+  return { success: false, message: 'Share sheet is available in Android native build.' };
+};
+
+export const consumeAndroidPendingIntents = async (): Promise<AndroidIncomingIntent[]> => {
+  if (isTauri()) {
+    try {
+      return await invoke<AndroidIncomingIntent[]>('consume_android_pending_intents');
+    } catch {
+      return [];
+    }
+  }
+  return [];
 };

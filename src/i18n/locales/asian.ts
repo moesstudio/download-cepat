@@ -424,6 +424,11 @@ export const zh: Record<TranslationKey, string> = {
   'errorBoundary.title': '应用程序发生错误',
   'errorBoundary.desc': '请重新加载应用或重置本地缓存:',
   'errorBoundary.resetBtn': '重置数据并重载',
+  'mobile.shareFile': '分享文件',
+  'mobile.savedToDownloads': '已保存至 Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': '社交媒体视频解析 (yt-dlp/FFmpeg) 将在 Android 第二阶段推出。目前支持 HTTP/HTTPS 直链、直接视频链接、FTP 以及 BitTorrent/磁力链接。',
+  'mobile.installApkUpdate': '下载并安装 APK',
+  'mobile.navSettings': '设置',
 };
 
 export const ko: Record<TranslationKey, string> = {
@@ -850,6 +855,11 @@ export const ko: Record<TranslationKey, string> = {
   'errorBoundary.title': '애플리케이션 오류가 발생했습니다',
   'errorBoundary.desc': '다시 로드하거나 로컬 데이터를 초기화하세요:',
   'errorBoundary.resetBtn': '데이터 초기화 및 새로고침',
+  'mobile.shareFile': '파일 공유',
+  'mobile.savedToDownloads': 'Downloads/Download Cepat 에 저장됨',
+  'mobile.videoPhase2Notice': '소셜 미디어 동영상 추출 (yt-dlp/FFmpeg)은 Android 2단계에서 지원될 예정입니다. HTTP/HTTPS 직접 파일, 직접 동영상, FTP, BitTorrent/마그넷은 즉시 사용할 수 있습니다.',
+  'mobile.installApkUpdate': 'APK 다운로드 및 설치',
+  'mobile.navSettings': '설정',
 };
 
 export const hi: Record<TranslationKey, string> = {
@@ -1276,6 +1286,11 @@ export const hi: Record<TranslationKey, string> = {
   'errorBoundary.title': 'एप्लिकेशन त्रुटि हुई',
   'errorBoundary.desc': 'कृपया रीलोड करें या डेटा रीसेट करें:',
   'errorBoundary.resetBtn': 'डेटा रीसेट और रीलोड करें',
+  'mobile.shareFile': 'फ़ाइल साझा करें',
+  'mobile.savedToDownloads': 'Downloads/Download Cepat में सहेजा गया',
+  'mobile.videoPhase2Notice': 'सोशल वीडियो एक्सट्रैक्टर (yt-dlp/FFmpeg) Android चरण 2 के लिए नियोजित है। HTTP/HTTPS डायरेक्ट फ़ाइलें, डायरेक्ट वीडियो, FTP और BitTorrent/Magnet अभी पूरी तरह काम करते हैं।',
+  'mobile.installApkUpdate': 'APK डाउनलोड और इंस्टॉल करें',
+  'mobile.navSettings': 'सेटिंग्स',
 };
 
 export const vi: Record<TranslationKey, string> = {
@@ -1702,6 +1717,11 @@ export const vi: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Đã xảy ra lỗi ứng dụng',
   'errorBoundary.desc': 'Vui lòng tải lại ứng dụng hoặc đặt lại dữ liệu:',
   'errorBoundary.resetBtn': 'Đặt lại & Tải lại',
+  'mobile.shareFile': 'Chia sẻ tệp',
+  'mobile.savedToDownloads': 'Đã lưu vào Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'Trình trích xuất video mạng xã hội (yt-dlp/FFmpeg) dự kiến có mặt ở Giai đoạn 2 cho Android. Tệp HTTP/HTTPS trực tiếp, video trực tiếp, FTP và BitTorrent/Magnet hiện hoạt động đầy đủ.',
+  'mobile.installApkUpdate': 'Tải xuống & Cài đặt APK',
+  'mobile.navSettings': 'Cài đặt',
 };
 
 export const th: Record<TranslationKey, string> = {
@@ -2128,4 +2148,9 @@ export const th: Record<TranslationKey, string> = {
   'errorBoundary.title': 'เกิดข้อผิดพลาดในแอปพลิเคชัน',
   'errorBoundary.desc': 'โปรดโหลดใหม่หรือรีเซ็ตข้อมูล:',
   'errorBoundary.resetBtn': 'รีเซ็ตข้อมูลและโหลดใหม่',
+  'mobile.shareFile': 'แชร์ไฟล์',
+  'mobile.savedToDownloads': 'บันทึกไว้ที่ Downloads/Download Cepat แล้ว',
+  'mobile.videoPhase2Notice': 'ตัวดึงวิดีโอโซเชียล (yt-dlp/FFmpeg) มีแผนรองรับใน Android เฟส 2 ปัจจุบันรองรับไฟล์ HTTP/HTTPS, วิดีโอโดยตรง, FTP และ BitTorrent/Magnet เต็มรูปแบบ',
+  'mobile.installApkUpdate': 'ดาวน์โหลดและติดตั้ง APK',
+  'mobile.navSettings': 'ตั้งค่า',
 };

@@ -18,10 +18,13 @@ tauri-build = { version = "2.7.4", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.12.5", features = ["devtools", "tray-icon", "image-png"] }
+tauri = { version = "2.12.5", features = ["devtools", "image-png"] }
 tauri-plugin-log = "2"
 core-engine = { path = "../core-engine" }
-open = "5.4.5"
 dirs = "7.0.0"
 tokio = { version = "1.54.1", features = ["full"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+open = "5.4.5"
 

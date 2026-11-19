@@ -1,0 +1,11 @@
+{
+  "identifier": "mobile",
+  "description": "Mobile permissions for Android/iOS",
+  "platforms": ["android", "iOS"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:app:default"
+  ]
+}

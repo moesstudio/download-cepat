@@ -24,6 +24,105 @@ import {
   DEFAULT_SCHEDULER_CONFIG,
 } from '../utils/downloadUtils.ts';
 
+function seedSampleTasks() {
+  const now = Date.now();
+  localStorage.setItem(
+    'download_cepat_tasks',
+    JSON.stringify([
+      {
+        id: 'task-music',
+        url: 'https://www.youtube.com/watch?v=Jdj13fGMmmA',
+        fileName: 'Yura Yunita - Dunia Tipu-Tipu.mp3',
+        fileSize: 13141681,
+        downloadedBytes: 13141681,
+        status: 'completed',
+        categoryId: 'music',
+        destinationPath: '~/Downloads/Music/Yura Yunita - Dunia Tipu-Tipu.mp3',
+        supportsRange: true,
+        numConnections: 8,
+        speedLimitBytesPerSec: 0,
+        speedBytesPerSec: 0,
+        etaSeconds: 0,
+        progressPercent: 100.0,
+        createdAt: new Date(now - 60000).toISOString(),
+        completedAt: new Date(now - 50000).toISOString(),
+      },
+      {
+        id: 'task-video',
+        url: 'https://www.youtube.com/watch?v=Jdj13fGMmmA',
+        fileName: 'Yura Yunita - Dunia Tipu-Tipu.mp4',
+        fileSize: 10326243,
+        downloadedBytes: 10326243,
+        status: 'completed',
+        categoryId: 'video',
+        destinationPath: '~/Downloads/Video/Yura Yunita - Dunia Tipu-Tipu.mp4',
+        supportsRange: true,
+        numConnections: 8,
+        speedLimitBytesPerSec: 0,
+        speedBytesPerSec: 0,
+        etaSeconds: 0,
+        progressPercent: 100.0,
+        createdAt: new Date(now - 70000).toISOString(),
+        completedAt: new Date(now - 60000).toISOString(),
+      },
+      {
+        id: 'task-compressed',
+        url: 'https://github.com/moesstudio/download-cepat/archive/refs/heads/main.zip',
+        fileName: 'download-cepat-main.zip',
+        fileSize: 3339657,
+        downloadedBytes: 3339657,
+        status: 'completed',
+        categoryId: 'compressed',
+        destinationPath: '~/Downloads/Compressed/download-cepat-main.zip',
+        supportsRange: false,
+        numConnections: 1,
+        speedLimitBytesPerSec: 0,
+        speedBytesPerSec: 0,
+        etaSeconds: 0,
+        progressPercent: 100.0,
+        createdAt: new Date(now - 80000).toISOString(),
+        completedAt: new Date(now - 70000).toISOString(),
+      },
+      {
+        id: 'task-programs',
+        url: 'https://github.com/alacritty/alacritty/releases/download/v0.17.0/Alacritty-v0.17.0.dmg',
+        fileName: 'Alacritty-v0.17.0.dmg',
+        fileSize: 6136240,
+        downloadedBytes: 6136240,
+        status: 'completed',
+        categoryId: 'programs',
+        destinationPath: '~/Downloads/Programs/Alacritty-v0.17.0.dmg',
+        supportsRange: true,
+        numConnections: 8,
+        speedLimitBytesPerSec: 0,
+        speedBytesPerSec: 0,
+        etaSeconds: 0,
+        progressPercent: 100.0,
+        createdAt: new Date(now - 90000).toISOString(),
+        completedAt: new Date(now - 80000).toISOString(),
+      },
+      {
+        id: 'task-documents',
+        url: 'https://www.rfc-editor.org/rfc/rfc9110.pdf',
+        fileName: 'RFC_9110_HTTP_Semantics.pdf',
+        fileSize: 2858365,
+        downloadedBytes: 2858365,
+        status: 'completed',
+        categoryId: 'documents',
+        destinationPath: '~/Downloads/Documents/RFC_9110_HTTP_Semantics.pdf',
+        supportsRange: true,
+        numConnections: 8,
+        speedLimitBytesPerSec: 0,
+        speedBytesPerSec: 0,
+        etaSeconds: 0,
+        progressPercent: 100.0,
+        createdAt: new Date(now - 100000).toISOString(),
+        completedAt: new Date(now - 90000).toISOString(),
+      },
+    ])
+  );
+}
+
 describe('Download Cepat UI Suite', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -33,7 +132,7 @@ describe('Download Cepat UI Suite', () => {
     }
   });
 
-  it('F01-H1: Renders main dashboard in English default with seeded tasks and category counts', () => {
+  it('F01-H1: Renders clean empty dashboard on fresh install with zero seeded downloads', () => {
     render(<App />);
 
     // Brand and headers
@@ -42,13 +141,11 @@ describe('Download Cepat UI Suite', () => {
     expect(document.documentElement.lang).toBe('en');
     expect(document.documentElement.dir).toBe('ltr');
 
-    // Default tasks rendered
-    expect(screen.getByText('download-cepat-main.zip')).toBeInTheDocument();
-    expect(screen.getByText('Alacritty-v0.17.0.dmg')).toBeInTheDocument();
-    expect(screen.getByText('RFC_9110_HTTP_Semantics.pdf')).toBeInTheDocument();
-    expect(screen.getByText('Yura Yunita - Dunia Tipu-Tipu.mp4')).toBeInTheDocument();
-    expect(screen.getByText('Yura Yunita - Dunia Tipu-Tipu.mp3')).toBeInTheDocument();
+    // Clean initial state with 0 leftover tasks
+    expect(screen.getByText('No Downloads Yet')).toBeInTheDocument();
+    expect(screen.getByText('Total Tasks: 0')).toBeInTheDocument();
     expect(screen.getByText('Torrents')).toBeInTheDocument();
+    expect(screen.queryByText('download-cepat-main.zip')).not.toBeInTheDocument();
   });
 
   it('F01-H2: Opens Add URL modal and adds a new download task', () => {
@@ -85,6 +182,7 @@ describe('Download Cepat UI Suite', () => {
   });
 
   it('F02-H1: Filters task table when searching by filename', () => {
+    seedSampleTasks();
     render(<App />);
 
     const searchInput = screen.getByPlaceholderText('Search files...');
@@ -99,6 +197,7 @@ describe('Download Cepat UI Suite', () => {
   });
 
   it('F02-E1: Category filter switching', () => {
+    seedSampleTasks();
     render(<App />);
 
     // Click "Music" filter in sidebar
@@ -112,6 +211,7 @@ describe('Download Cepat UI Suite', () => {
   });
 
   it('F03-H1: Pause and resume download controls', () => {
+    seedSampleTasks();
     render(<App />);
 
     // Select active task row
@@ -209,6 +309,7 @@ describe('Download Cepat UI Suite', () => {
   });
 
   it('F05: Multi-select checkboxes mark tasks and toolbar delete marked works', () => {
+    seedSampleTasks();
     render(<App />);
 
     // Mark the first file checkbox
@@ -858,6 +959,7 @@ describe('Download Cepat UI Suite', () => {
   });
 
   it('F20: IDM-style non-scrolling wrapped toolbar exposes Torrent and Clear Done actions', () => {
+    seedSampleTasks();
     render(<App />);
 
     const toolbar = screen.getByTestId('main-toolbar');
@@ -1049,5 +1151,121 @@ describe('Download Cepat UI Suite', () => {
       laterSpy.mockRestore();
       promoteSpy.mockRestore();
     }
+  });
+
+  it('M01: Renders MobileShell layout, FAB, bottom nav, and MobileTaskSheet when forceMobileMode is enabled', () => {
+    seedSampleTasks();
+    render(<App forceMobileMode={true} />);
+
+    expect(screen.getByTestId('mobile-shell')).toBeInTheDocument();
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+
+    const nav = screen.getByRole('navigation', { name: 'Mobile Navigation' });
+    expect(nav).toHaveTextContent('All Downloads');
+    expect(nav).toHaveTextContent('In Progress');
+    expect(nav).toHaveTextContent('Completed');
+    expect(nav).toHaveTextContent('Settings');
+
+    // Completed task menu opens MobileTaskSheet with Share, Checksum, Open File, and Delete actions
+    const menuBtn = screen.getByRole('button', {
+      name: /Properties, Rename & Limit RFC_9110_HTTP_Semantics\.pdf/i,
+    });
+    fireEvent.click(menuBtn);
+
+    const sheet = screen.getByRole('dialog', { name: 'RFC_9110_HTTP_Semantics.pdf' });
+    expect(sheet).toHaveTextContent('Share File');
+    expect(sheet).toHaveTextContent('Verify Checksum (MD5/SHA)');
+    expect(sheet).toHaveTextContent('Open File');
+    expect(sheet).toHaveTextContent('Delete');
+
+    // Tapping Verify Checksum opens TaskPropertiesModal directly on checksum tab
+    fireEvent.click(screen.getByRole('button', { name: /Verify Checksum \(MD5\/SHA\)/i }));
+    expect(
+      screen.getByText('Verify File Integrity (MD5 / SHA-1 / SHA-256)')
+    ).toBeInTheDocument();
+
+    // Close Properties modal and tap FAB (+) to open AddUrlModal
+    const closeBtns = screen.getAllByRole('button', { name: /Close/i });
+    fireEvent.click(closeBtns[0]);
+    fireEvent.click(screen.getByRole('button', { name: /^Add URL$/i }));
+    expect(screen.getByText('Add New Download')).toBeInTheDocument();
+  });
+
+  it('M02: Hides desktop-only Startup and Browser Extension settings tabs on Android MobileShell', () => {
+    render(<App forceMobileMode={true} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Mobile Navigation' });
+    const navButtons = nav.querySelectorAll('button');
+    fireEvent.click(navButtons[navButtons.length - 1]);
+
+    expect(screen.getByRole('button', { name: /Speed & Language/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Categories & Disk/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Proxy & Site Logins/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Build Info/i })).toBeInTheDocument();
+
+    expect(screen.queryByRole('button', { name: /Auto Startup/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Browser Extension/i })).not.toBeInTheDocument();
+  });
+
+  it('M03: Consumes pending Android magnet intent on mount and auto-opens AddUrlModal prefilled', async () => {
+    const magnetUri =
+      'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Ubuntu';
+    const isTauriSpy = vi.spyOn(nativeBridge, 'isTauri').mockReturnValue(true);
+    const buildInfoSpy = vi.spyOn(nativeBridge, 'getBuildInfo').mockResolvedValue({
+      ...nativeBridge.FALLBACK_BUILD_INFO,
+      os: 'android',
+      arch: 'aarch64',
+    });
+    const intentSpy = vi
+      .spyOn(nativeBridge, 'consumeAndroidPendingIntents')
+      .mockResolvedValue([{ kind: 'magnet', value: magnetUri }]);
+    const syncSpy = vi.spyOn(nativeBridge, 'syncRuntimeSettings').mockResolvedValue();
+    const langSpy = vi.spyOn(nativeBridge, 'setTrayLanguage').mockResolvedValue();
+    const checkSpy = vi.spyOn(nativeBridge, 'checkForAppUpdate').mockResolvedValue({
+      currentVersion: '1.0.5',
+      latestVersion: '1.0.5',
+      updateAvailable: false,
+      releaseUrl: nativeBridge.OFFICIAL_RELEASES_URL,
+      releaseNotes: '',
+      publishedAt: null,
+      assetName: null,
+      assetUrl: null,
+      assetSize: null,
+      assetSha256: null,
+      installKind: 'android_apk',
+      inPlaceSupported: true,
+    });
+    const popupSpy = vi.spyOn(nativeBridge, 'openDownloadPopup').mockResolvedValue(null);
+
+    try {
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('mobile-shell')).toBeInTheDocument();
+        expect(intentSpy).toHaveBeenCalledTimes(1);
+        expect(
+          screen.getByText('Add Torrent File (.torrent) or Magnet Link')
+        ).toBeInTheDocument();
+        expect(screen.getByDisplayValue(magnetUri)).toBeInTheDocument();
+      });
+    } finally {
+      isTauriSpy.mockRestore();
+      buildInfoSpy.mockRestore();
+      intentSpy.mockRestore();
+      syncSpy.mockRestore();
+      langSpy.mockRestore();
+      checkSpy.mockRestore();
+      popupSpy.mockRestore();
+    }
+  });
+
+  it('M04: Renders clean empty MobileShell on fresh Android install with zero leftover downloads', () => {
+    render(<App forceMobileMode={true} />);
+
+    expect(screen.getByTestId('mobile-shell')).toBeInTheDocument();
+    expect(screen.getByText('All Downloads (0)')).toBeInTheDocument();
+    expect(screen.getByText('Compressed (0)')).toBeInTheDocument();
+    expect(screen.getByText('No Downloads Yet')).toBeInTheDocument();
+    expect(screen.queryByText('download-cepat-main.zip')).not.toBeInTheDocument();
   });
 });

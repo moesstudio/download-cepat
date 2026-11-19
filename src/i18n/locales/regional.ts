@@ -424,6 +424,11 @@ export const id: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Terjadi Kesalahan Aplikasi',
   'errorBoundary.desc': 'Silakan muat ulang atau reset data lokal berikut:',
   'errorBoundary.resetBtn': 'Reset Data & Muat Ulang',
+  'mobile.shareFile': 'Bagikan Berkas',
+  'mobile.savedToDownloads': 'Tersimpan di Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'Ekstraktor video media sosial (yt-dlp/FFmpeg) akan hadir di Fase 2 Android. Unduhan file HTTP/HTTPS langsung, tautan video langsung, FTP, dan BitTorrent/Magnet sudah didukung penuh.',
+  'mobile.installApkUpdate': 'Unduh & Pasang APK',
+  'mobile.navSettings': 'Pengaturan',
 };
 
 export const ms: Record<TranslationKey, string> = {
@@ -850,6 +855,11 @@ export const ms: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Ralat Aplikasi Berlaku',
   'errorBoundary.desc': 'Sila muat semula atau tetapkan semula data tempatan:',
   'errorBoundary.resetBtn': 'Tetap Semula & Muat Semula',
+  'mobile.shareFile': 'Kongsi Fail',
+  'mobile.savedToDownloads': 'Disimpan ke Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'Pengekstrak video media sosial (yt-dlp/FFmpeg) dirancang untuk Fasa 2 Android. Fail terus HTTP/HTTPS, video terus, FTP, dan BitTorrent/Magnet berfungsi sepenuhnya.',
+  'mobile.installApkUpdate': 'Muat Turun & Pasang APK',
+  'mobile.navSettings': 'Tetapan',
 };
 
 export const ja: Record<TranslationKey, string> = {
@@ -1276,4 +1286,9 @@ export const ja: Record<TranslationKey, string> = {
   'errorBoundary.title': 'アプリケーションエラーが発生しました',
   'errorBoundary.desc': '再読み込みするかローカルデータをリセットしてください:',
   'errorBoundary.resetBtn': 'データをリセットして再読み込み',
+  'mobile.shareFile': 'ファイルを共有',
+  'mobile.savedToDownloads': 'Downloads/Download Cepat に保存済み',
+  'mobile.videoPhase2Notice': 'SNS動画抽出機能 (yt-dlp/FFmpeg) は Android フェーズ2で対応予定です。HTTP/HTTPS・直接動画・FTP・BitTorrent/Magnet は現在すぐにご利用いただけます。',
+  'mobile.installApkUpdate': 'APK をダウンロードして更新',
+  'mobile.navSettings': '設定',
 };

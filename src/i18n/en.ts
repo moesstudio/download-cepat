@@ -443,6 +443,13 @@ export const en = {
   'errorBoundary.title': 'Application Error Occurred',
   'errorBoundary.desc': 'Please reload the app or reset local storage:',
   'errorBoundary.resetBtn': 'Reset Data & Reload',
+
+  // Mobile (Android)
+  'mobile.shareFile': 'Share File',
+  'mobile.savedToDownloads': 'Saved to Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'Social media video extractor (yt-dlp/FFmpeg) is planned for Android Phase 2. HTTP/HTTPS direct files, direct video links, FTP, and BitTorrent/Magnet work natively.',
+  'mobile.installApkUpdate': 'Download & Install APK',
+  'mobile.navSettings': 'Settings',
 } as const;
 
 export type TranslationKey = keyof typeof en;

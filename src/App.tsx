@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { DownloadCloud, ExternalLink } from 'lucide-react';
 import {
+  AndroidIncomingIntent,
   AppUpdateInfo,
   AppUpdateProgress,
   BuildInfo,
@@ -23,6 +24,8 @@ import {
 import { CategorySidebar } from './components/CategorySidebar.tsx';
 import { Toolbar } from './components/Toolbar.tsx';
 import { TaskDataTable } from './components/TaskDataTable.tsx';
+import { MobileShell } from './components/MobileShell.tsx';
+import { MobileTaskSheet } from './components/MobileTaskSheet.tsx';
 import { AddUrlModal } from './components/AddUrlModal.tsx';
 import { DownloadProgressModal } from './components/DownloadProgressModal.tsx';
 import { DownloadCompleteModal } from './components/DownloadCompleteModal.tsx';
@@ -35,6 +38,8 @@ import { MiniDropTarget } from './components/MiniDropTarget.tsx';
 import {
   openNativeFolder,
   openNativeFile,
+  shareDownloadedFile,
+  consumeAndroidPendingIntents,
   inspectNativeUrlDetailed,
   inspectTorrentBytes,
   openDownloadPopup,
@@ -53,6 +58,7 @@ import {
   openExternalUrl,
   setTrayLanguage,
   syncRuntimeSettings,
+  isAndroidPlatform,
   isTauri,
 } from './services/nativeBridge.ts';
 import {
@@ -80,108 +86,21 @@ import {
 } from './i18n/index.tsx';
 
 const INITIAL_CATEGORIES: Category[] = [
-  { id: 'compressed', name: 'Compressed', icon: 'archive', extensions: ['.zip', '.rar', '.7z', '.iso'], count: 1 },
-  { id: 'documents', name: 'Documents', icon: 'file-text', extensions: ['.pdf', '.docx', '.xlsx'], count: 1 },
-  { id: 'music', name: 'Music', icon: 'music', extensions: ['.mp3', '.flac', '.wav'], count: 1 },
-  { id: 'programs', name: 'Programs', icon: 'cpu', extensions: ['.dmg', '.exe', '.pkg'], count: 1 },
-  { id: 'video', name: 'Video', icon: 'video', extensions: ['.mp4', '.mkv', '.mov'], count: 1 },
+  { id: 'compressed', name: 'Compressed', icon: 'archive', extensions: ['.zip', '.rar', '.7z', '.iso'], count: 0 },
+  { id: 'documents', name: 'Documents', icon: 'file-text', extensions: ['.pdf', '.docx', '.xlsx'], count: 0 },
+  { id: 'music', name: 'Music', icon: 'music', extensions: ['.mp3', '.flac', '.wav'], count: 0 },
+  { id: 'programs', name: 'Programs', icon: 'cpu', extensions: ['.dmg', '.exe', '.pkg'], count: 0 },
+  { id: 'video', name: 'Video', icon: 'video', extensions: ['.mp4', '.mkv', '.mov'], count: 0 },
   { id: 'torrents', name: 'Torrents', icon: 'magnet', extensions: ['.torrent'], count: 0 },
 ];
 
-const INITIAL_TASKS: DownloadTask[] = [
-  {
-    id: 'task-music',
-    url: 'https://www.youtube.com/watch?v=Jdj13fGMmmA&list=RDgusshrOoODw&index=14',
-    fileName: 'Yura Yunita - Dunia Tipu-Tipu.mp3',
-    fileSize: 13141681, // 13.1 MB Real Full MP3
-    downloadedBytes: 13141681,
-    status: 'completed',
-    categoryId: 'music',
-    destinationPath: '~/Downloads/Music/Yura Yunita - Dunia Tipu-Tipu.mp3',
-    supportsRange: true,
-    numConnections: 8,
-    speedLimitBytesPerSec: 0,
-    speedBytesPerSec: 0,
-    etaSeconds: 0,
-    progressPercent: 100.0,
-    createdAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-    completedAt: new Date(Date.now() - 1000 * 60 * 14).toISOString(),
-  },
-  {
-    id: 'task-video',
-    url: 'https://www.youtube.com/watch?v=Jdj13fGMmmA',
-    fileName: 'Yura Yunita - Dunia Tipu-Tipu.mp4',
-    fileSize: 10326243, // 9.85 MB Real MP4 Video
-    downloadedBytes: 10326243,
-    status: 'completed',
-    categoryId: 'video',
-    destinationPath: '~/Downloads/Video/Yura Yunita - Dunia Tipu-Tipu.mp4',
-    supportsRange: true,
-    numConnections: 8,
-    speedLimitBytesPerSec: 0,
-    speedBytesPerSec: 0,
-    etaSeconds: 0,
-    progressPercent: 100.0,
-    createdAt: new Date(Date.now() - 1000 * 60 * 20).toISOString(),
-    completedAt: new Date(Date.now() - 1000 * 60 * 19).toISOString(),
-  },
-  {
-    id: 'task-compressed',
-    url: 'https://github.com/moesstudio/download-cepat/archive/refs/heads/main.zip',
-    fileName: 'download-cepat-main.zip',
-    fileSize: 3339657, // 3.18 MB Real Zip
-    downloadedBytes: 3339657,
-    status: 'completed',
-    categoryId: 'compressed',
-    destinationPath: '~/Downloads/Compressed/download-cepat-main.zip',
-    supportsRange: false,
-    numConnections: 1,
-    speedLimitBytesPerSec: 0,
-    speedBytesPerSec: 0,
-    etaSeconds: 0,
-    progressPercent: 100.0,
-    createdAt: new Date(Date.now() - 1000 * 60 * 25).toISOString(),
-    completedAt: new Date(Date.now() - 1000 * 60 * 24).toISOString(),
-  },
-  {
-    id: 'task-programs',
-    url: 'https://github.com/alacritty/alacritty/releases/download/v0.17.0/Alacritty-v0.17.0.dmg',
-    fileName: 'Alacritty-v0.17.0.dmg',
-    fileSize: 6136240, // 5.85 MB Real DMG
-    downloadedBytes: 6136240,
-    status: 'completed',
-    categoryId: 'programs',
-    destinationPath: '~/Downloads/Programs/Alacritty-v0.17.0.dmg',
-    supportsRange: true,
-    numConnections: 8,
-    speedLimitBytesPerSec: 0,
-    speedBytesPerSec: 0,
-    etaSeconds: 0,
-    progressPercent: 100.0,
-    createdAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-    completedAt: new Date(Date.now() - 1000 * 60 * 29).toISOString(),
-  },
-  {
-    id: 'task-documents',
-    url: 'https://www.rfc-editor.org/rfc/rfc9110.pdf',
-    fileName: 'RFC_9110_HTTP_Semantics.pdf',
-    fileSize: 2858365, // 2.73 MB Real PDF
-    downloadedBytes: 2858365,
-    status: 'completed',
-    categoryId: 'documents',
-    destinationPath: '~/Downloads/Documents/RFC_9110_HTTP_Semantics.pdf',
-    supportsRange: true,
-    numConnections: 8,
-    speedLimitBytesPerSec: 0,
-    speedBytesPerSec: 0,
-    etaSeconds: 0,
-    progressPercent: 100.0,
-    createdAt: new Date(Date.now() - 1000 * 60 * 35).toISOString(),
-    completedAt: new Date(Date.now() - 1000 * 60 * 34).toISOString(),
-  }
-];
+const INITIAL_TASKS: DownloadTask[] = [];
 
-export const App: React.FC = () => {
+export interface AppProps {
+  forceMobileMode?: boolean;
+}
+
+export const App: React.FC<AppProps> = ({ forceMobileMode }) => {
   const [lang, setLang] = useState<LanguageCode>(() => {
     try {
       const saved = localStorage.getItem('download_cepat_lang');
@@ -206,6 +125,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     getBuildInfo().then(setBuildInfo).catch(() => {});
   }, []);
+  const isMobileView = forceMobileMode ?? isAndroidPlatform(buildInfo);
+  const isMobileViewRef = React.useRef(isMobileView);
+  useEffect(() => {
+    isMobileViewRef.current = isMobileView;
+  }, [isMobileView]);
 
   const [tasks, setTasks] = useState<DownloadTask[]>(() => {
     try {
@@ -448,6 +372,7 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [activeDetailTaskId, setActiveDetailTaskId] = useState<string | null>(null);
+  const [mobileSheetTaskId, setMobileSheetTaskId] = useState<string | null>(null);
   const activeDetailTaskIdRef = React.useRef<string | null>(activeDetailTaskId);
   useEffect(() => {
     activeDetailTaskIdRef.current = activeDetailTaskId;
@@ -459,6 +384,9 @@ export const App: React.FC = () => {
   const propertiesTask = React.useMemo(() => {
     return tasks.find((t) => t.id === propertiesTaskId) || null;
   }, [tasks, propertiesTaskId]);
+  const mobileSheetTask = React.useMemo(() => {
+    return tasks.find((t) => t.id === mobileSheetTaskId) || null;
+  }, [tasks, mobileSheetTaskId]);
 
   const openAddDownloadEntry = React.useCallback(
     (opts?: {
@@ -503,7 +431,7 @@ export const App: React.FC = () => {
         setIsAddUrlOpen(true);
       };
 
-      if (isTauri()) {
+      if (isTauri() && !isMobileViewRef.current) {
         void openDownloadPopup({
           source: opts?.source ?? 'manual',
           initialMode: mode,
@@ -514,9 +442,15 @@ export const App: React.FC = () => {
           userAgent: opts?.userAgent,
           fileSize: opts?.fileSize ?? null,
           mimeType: opts?.mimeType ?? null,
-        }).catch(() => {
-          openFallbackModal();
-        });
+        })
+          .then((popupId) => {
+            if (!popupId) {
+              openFallbackModal();
+            }
+          })
+          .catch(() => {
+            openFallbackModal();
+          });
         return;
       }
 
@@ -1090,49 +1024,121 @@ export const App: React.FC = () => {
       showToast(translate(langRef.current, 'toast.trayPausedAll'), 'info');
     }).then((u) => { unlistenTrayPause = u; }).catch(() => {});
 
-    getCurrentWebview()
-      .onDragDropEvent(async (event) => {
-        if (event.payload.type !== 'drop') return;
-        const paths = event.payload.paths || [];
-        const collectedUrls: string[] = [];
-        for (const path of paths) {
-          if (/\.torrent$/i.test(path)) {
-            try {
-              const { result } = await inspectNativeUrlDetailed(path);
-              collectedUrls.push(result?.url || path);
-            } catch {
-              collectedUrls.push(path);
-            }
-          } else if (/\.(txt|ef2|lst)$/i.test(path)) {
-            try {
-              const content = await readTextFilePreview(path);
-              collectedUrls.push(...parseUrlListText(content));
-            } catch (err) {
-              showToast(String(err), 'warning');
+    try {
+      getCurrentWebview()
+        .onDragDropEvent(async (event) => {
+          if (event.payload.type !== 'drop') return;
+          const paths = event.payload.paths || [];
+          const collectedUrls: string[] = [];
+          for (const path of paths) {
+            if (/\.torrent$/i.test(path)) {
+              try {
+                const { result } = await inspectNativeUrlDetailed(path);
+                collectedUrls.push(result?.url || path);
+              } catch {
+                collectedUrls.push(path);
+              }
+            } else if (/\.(txt|ef2|lst)$/i.test(path)) {
+              try {
+                const content = await readTextFilePreview(path);
+                collectedUrls.push(...parseUrlListText(content));
+              } catch (err) {
+                showToast(String(err), 'warning');
+              }
             }
           }
-        }
-        const unique = Array.from(new Set(collectedUrls));
-        if (unique.length === 1) {
-          openAddDownloadEntry({
-            url: unique[0],
-            initialMode: isTorrentReference(unique[0]) ? 'torrent' : 'url',
-            source: 'drop',
-          });
-        } else if (unique.length > 1) {
-          setBatchInitialText(unique.join('\n'));
-          setBatchInitialTab('batch');
-          setIsBatchOpen(true);
-        }
-      })
-      .then((u) => { unlistenDragDrop = u; })
-      .catch(() => {});
+          const unique = Array.from(new Set(collectedUrls));
+          if (unique.length === 1) {
+            openAddDownloadEntry({
+              url: unique[0],
+              initialMode: isTorrentReference(unique[0]) ? 'torrent' : 'url',
+              source: 'drop',
+            });
+          } else if (unique.length > 1) {
+            setBatchInitialText(unique.join('\n'));
+            setBatchInitialTab('batch');
+            setIsBatchOpen(true);
+          }
+        })
+        .then((u) => { unlistenDragDrop = u; })
+        .catch(() => {});
+    } catch {}
 
     return () => {
       if (unlistenLinks) unlistenLinks();
       if (unlistenTrayAdd) unlistenTrayAdd();
       if (unlistenTrayPause) unlistenTrayPause();
       if (unlistenDragDrop) unlistenDragDrop();
+    };
+  }, [openAddDownloadEntry]);
+
+  // Android Share Intent, magnet:/torrent VIEW Intent, and Notification Pause All actions
+  const handledAndroidIntentRef = React.useRef<{ key: string; ts: number } | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlistenIntent: (() => void) | undefined;
+    let unlistenNotifAction: (() => void) | undefined;
+
+    const handleAndroidIntent = (intent: AndroidIncomingIntent) => {
+      const value = intent?.value?.trim();
+      if (!value) return;
+      const dedupeKey = `${intent.kind}:${value}`;
+      const now = Date.now();
+      if (
+        handledAndroidIntentRef.current &&
+        handledAndroidIntentRef.current.key === dedupeKey &&
+        now - handledAndroidIntentRef.current.ts < 5000
+      ) {
+        return;
+      }
+      handledAndroidIntentRef.current = { key: dedupeKey, ts: now };
+      const initialMode: 'url' | 'torrent' =
+        intent.kind === 'torrent_file' || intent.kind === 'magnet' || isTorrentReference(value)
+          ? 'torrent'
+          : 'url';
+      openAddDownloadEntry({
+        initialMode,
+        url: value,
+        source: 'manual',
+      });
+    };
+
+    listen<AndroidIncomingIntent>('android-incoming-intent', (event) => {
+      if (event.payload) {
+        handleAndroidIntent(event.payload);
+      }
+    })
+      .then((u) => {
+        unlistenIntent = u;
+      })
+      .catch(() => {});
+
+    listen<{ action?: string }>('android-notification-action', (event) => {
+      if (event.payload?.action === 'pause_all') {
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.status === 'downloading' || t.status === 'connecting' || t.status === 'assembling'
+              ? { ...t, status: 'paused', speedBytesPerSec: 0, etaSeconds: 0 }
+              : t
+          )
+        );
+        showToast(translate(langRef.current, 'toast.trayPausedAll'), 'info');
+      }
+    })
+      .then((u) => {
+        unlistenNotifAction = u;
+      })
+      .catch(() => {});
+
+    void consumeAndroidPendingIntents()
+      .then((items) => {
+        items.forEach(handleAndroidIntent);
+      })
+      .catch(() => {});
+
+    return () => {
+      if (unlistenIntent) unlistenIntent();
+      if (unlistenNotifAction) unlistenNotifAction();
     };
   }, [openAddDownloadEntry]);
 
@@ -1787,23 +1793,27 @@ export const App: React.FC = () => {
     );
   };
 
-  const handleDelete = () => {
-    if (!selectedTaskId) return;
-    const taskToDelete = tasks.find((t) => t.id === selectedTaskId);
+  const handleDeleteById = (id: string) => {
+    const taskToDelete = tasks.find((t) => t.id === id);
     if (taskToDelete && taskToDelete.status !== 'completed') {
       void cancelRealDownload(
         taskToDelete.id,
         getSafeCleanupPath(taskToDelete, new Set([taskToDelete.id]))
       );
     }
-    if (activeDetailTaskId === selectedTaskId) {
+    if (activeDetailTaskId === id) {
       setActiveDetailTaskId(null);
       setIsProgressOpen(false);
       setIsCompleteOpen(false);
     }
-    setTasks((prev) => prev.filter((t) => t.id !== selectedTaskId));
-    setMarkedTaskIds((prev) => prev.filter((id) => id !== selectedTaskId));
-    setSelectedTaskId(null);
+    if (mobileSheetTaskId === id) {
+      setMobileSheetTaskId(null);
+    }
+    setTasks((prev) => prev.filter((t) => t.id !== id));
+    setMarkedTaskIds((prev) => prev.filter((x) => x !== id));
+    if (selectedTaskId === id) {
+      setSelectedTaskId(null);
+    }
     if (taskToDelete) {
       showToast(
         taskToDelete.status !== 'completed'
@@ -1812,6 +1822,11 @@ export const App: React.FC = () => {
         'info'
       );
     }
+  };
+
+  const handleDelete = () => {
+    if (!selectedTaskId) return;
+    handleDeleteById(selectedTaskId);
   };
 
   const handleOpenFolder = async (taskToOpen?: DownloadTask) => {
@@ -1826,6 +1841,13 @@ export const App: React.FC = () => {
   const handleOpenFile = async (task: DownloadTask) => {
     showToast(translate(langRef.current, 'toast.openingFile', { name: task.fileName }), 'info');
     const res = await openNativeFile(task.destinationPath);
+    if (!res.success) {
+      showToast(res.message, 'warning');
+    }
+  };
+
+  const handleShareFile = async (task: DownloadTask) => {
+    const res = await shareDownloadedFile(task.destinationPath);
     if (!res.success) {
       showToast(res.message, 'warning');
     }
@@ -1877,8 +1899,40 @@ export const App: React.FC = () => {
         }}
         className="flex h-screen w-screen overflow-hidden bg-bg text-text"
       >
-        {/* S01: Left Navigation Sidebar */}
-        <CategorySidebar
+        {isMobileView ? (
+          <MobileShell
+            tasks={tasks}
+            categories={dynamicCategories.map((c) => ({
+              ...c,
+              count: categoryCounts[c.id] || 0,
+            }))}
+            activeCategory={selectedCategoryId}
+            onSelectCategory={setSelectedCategoryId}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            defaultConnections={settings.defaultConnections}
+            updateAvailableVersion={
+              appUpdateInfo?.updateAvailable ? appUpdateInfo.latestVersion : null
+            }
+            onAddUrl={() => openAddDownloadEntry({ initialMode: 'url', source: 'manual' })}
+            onAddTorrent={() => openAddDownloadEntry({ initialMode: 'torrent', source: 'manual' })}
+            onPauseTask={handlePause}
+            onResumeTask={handleResume}
+            onPauseAll={handleStopAll}
+            onClearCompleted={handleClearCompleted}
+            onOpenFile={handleOpenFile}
+            onShareFile={handleShareFile}
+            onOpenTaskMenu={(task) => setMobileSheetTaskId(task.id)}
+            onOpenProgress={handleOpenDetails}
+            onOpenSettings={(tab = 'network') => {
+              setSettingsInitialTab(tab);
+              setIsSettingsOpen(true);
+            }}
+          />
+        ) : (
+          <>
+            {/* S01: Left Navigation Sidebar */}
+            <CategorySidebar
           selectedCategory={selectedCategoryId}
           onSelectCategory={setSelectedCategoryId}
           categories={dynamicCategories}
@@ -2079,6 +2133,8 @@ export const App: React.FC = () => {
             </div>
           </footer>
         </main>
+          </>
+        )}
 
       {/* S02: Add URL Modal Dialog */}
       <AddUrlModal
@@ -2098,6 +2154,7 @@ export const App: React.FC = () => {
         initialMode={addUrlInitialMode}
         incomingMeta={incomingMeta}
         defaultConnections={settings.defaultConnections}
+        isAndroid={isMobileView}
       />
 
       {/* S04: Active Download Segmented Progress Dialog */}
@@ -2133,6 +2190,7 @@ export const App: React.FC = () => {
       <SpeedLimiterModal
         isOpen={isSettingsOpen}
         initialTab={settingsInitialTab}
+        isAndroid={isMobileView}
         onClose={() => setIsSettingsOpen(false)}
         speedLimitKbs={speedLimitKbs}
         maxTasks={settings.maxTasks}
@@ -2273,9 +2331,30 @@ export const App: React.FC = () => {
         }}
       />
 
+      {/* Mobile Task Bottom Action Sheet */}
+      <MobileTaskSheet
+        task={mobileSheetTask}
+        onClose={() => setMobileSheetTaskId(null)}
+        onPause={handlePause}
+        onResume={handleResume}
+        onOpenFile={handleOpenFile}
+        onShareFile={handleShareFile}
+        onOpenProgress={handleOpenDetails}
+        onOpenProperties={(task, tab = 'info') => {
+          setPropertiesTaskId(task.id);
+          setPropertiesInitialTab(tab);
+          setIsPropertiesOpen(true);
+        }}
+        onCopyUrl={(copiedUrl) => {
+          navigator.clipboard?.writeText(copiedUrl).catch(() => {});
+          showToast(translate(langRef.current, 'toast.urlCopied'), 'info');
+        }}
+        onDelete={handleDeleteById}
+      />
+
       {/* Floating Mini Drop Target */}
       <MiniDropTarget
-        visible={isMiniDropOpen}
+        visible={!isMobileView && isMiniDropOpen}
         activeCount={tasks.filter((t) => t.status === 'downloading').length}
         totalSpeedBytesPerSec={tasks.reduce(
           (acc, t) => acc + (t.status === 'downloading' ? t.speedBytesPerSec : 0),
@@ -2312,7 +2391,9 @@ export const App: React.FC = () => {
       {/* Toast Notification Banner */}
       {toast && (
         <div
-          className={`fixed bottom-8 right-6 z-50 max-w-md px-4 py-3 rounded-lg shadow-pop border text-xs font-medium flex items-center space-x-2.5 animate-in fade-in slide-in-from-bottom-2 duration-150 ${
+          className={`fixed ${
+            isMobileView ? 'bottom-20 left-4 right-4 mx-auto' : 'bottom-8 right-6'
+          } z-50 max-w-md px-4 py-3 rounded-lg shadow-pop border text-xs font-medium flex items-center space-x-2.5 animate-in fade-in slide-in-from-bottom-2 duration-150 ${
             toast.type === 'warning'
               ? 'bg-surface border-warning/50 text-warning shadow-warning/5'
               : toast.type === 'success'

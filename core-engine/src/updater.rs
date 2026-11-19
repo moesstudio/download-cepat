@@ -46,6 +46,7 @@ pub enum UpdateInstallKind {
     LinuxAppImage,
     LinuxDeb,
     LinuxRpm,
+    AndroidApk,
     Manual,
 }
 
@@ -59,6 +60,7 @@ impl UpdateInstallKind {
             UpdateInstallKind::LinuxAppImage => "linux_appimage",
             UpdateInstallKind::LinuxDeb => "linux_deb",
             UpdateInstallKind::LinuxRpm => "linux_rpm",
+            UpdateInstallKind::AndroidApk => "android_apk",
             UpdateInstallKind::Manual => "manual",
         }
     }
@@ -72,6 +74,7 @@ impl UpdateInstallKind {
                 | UpdateInstallKind::LinuxAppImage
                 | UpdateInstallKind::LinuxDeb
                 | UpdateInstallKind::LinuxRpm
+                | UpdateInstallKind::AndroidApk
         )
     }
 }
@@ -219,6 +222,13 @@ fn asset_matches_arch(lower_name: &str, arch: &str, allow_universal: bool) -> bo
             lower_name.contains("aarch64")
                 || lower_name.contains("arm64")
         }
+        "arm" => {
+            (lower_name.contains("armeabi-v7a")
+                || lower_name.contains("armv7")
+                || lower_name.contains("arm32"))
+                && !lower_name.contains("arm64")
+                && !lower_name.contains("aarch64")
+        }
         "x86_64" => {
             (lower_name.contains("x86_64")
                 || lower_name.contains("amd64")
@@ -319,6 +329,12 @@ pub fn select_asset_for_platform(
             }
             if let Some(rpm) = find_matching_asset(assets, ".rpm", &env.arch, false) {
                 return Some((rpm.clone(), UpdateInstallKind::LinuxRpm));
+            }
+            None
+        }
+        "android" => {
+            if let Some(apk) = find_matching_asset(assets, ".apk", &env.arch, true) {
+                return Some((apk.clone(), UpdateInstallKind::AndroidApk));
             }
             None
         }

@@ -82,6 +82,7 @@ interface SpeedLimiterModalProps {
   onInstallUpdate?: () => void;
   onChangeLanguage?: (next: LanguageCode) => void;
   onSaveSpeedLimit?: (limitKbs: number) => void;
+  isAndroid?: boolean;
   onSaveSettings?: (settings: {
     speedLimitKbs: number;
     maxTasks: number;
@@ -116,10 +117,13 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
   onInstallUpdate,
   onChangeLanguage,
   onSaveSpeedLimit,
+  isAndroid = false,
   onSaveSettings,
 }) => {
   const { lang, setLang, t } = useI18n();
-  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  const safeInitialTab =
+    isAndroid && (initialTab === 'startup' || initialTab === 'browser') ? 'network' : initialTab;
+  const [activeTab, setActiveTab] = useState<SettingsTab>(safeInitialTab);
   const [isEnabled, setIsEnabled] = useState(speedLimitKbs > 0);
   const [limitVal, setLimitVal] = useState(speedLimitKbs > 0 ? speedLimitKbs : 2048);
   const [maxTasks, setMaxTasks] = useState(propMaxTasks);
@@ -150,7 +154,9 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setActiveTab(initialTab);
+      setActiveTab(
+        isAndroid && (initialTab === 'startup' || initialTab === 'browser') ? 'network' : initialTab
+      );
       setIsEnabled(speedLimitKbs > 0);
       setLimitVal(speedLimitKbs > 0 ? speedLimitKbs : 2048);
       setMaxTasks(propMaxTasks);
@@ -294,28 +300,32 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
             <ClipboardCheck className="w-3.5 h-3.5" />
             <span>{t('settings.tabClipboard')}</span>
           </button>
-          <button
-            onClick={() => setActiveTab('startup')}
-            className={`flex items-center space-x-1.5 px-2.5 py-2 border-b-2 font-medium transition-colors ${
-              activeTab === 'startup'
-                ? 'border-accent text-accent font-semibold'
-                : 'border-transparent text-text-muted hover:text-text'
-            }`}
-          >
-            <Power className="w-3.5 h-3.5" />
-            <span>{t('settings.tabStartup')}</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('browser')}
-            className={`flex items-center space-x-1.5 px-2.5 py-2 border-b-2 font-medium transition-colors ${
-              activeTab === 'browser'
-                ? 'border-accent text-accent font-semibold'
-                : 'border-transparent text-text-muted hover:text-text'
-            }`}
-          >
-            <Chrome className="w-3.5 h-3.5" />
-            <span>{t('settings.tabBrowser')}</span>
-          </button>
+          {!isAndroid && (
+            <button
+              onClick={() => setActiveTab('startup')}
+              className={`flex items-center space-x-1.5 px-2.5 py-2 border-b-2 font-medium transition-colors ${
+                activeTab === 'startup'
+                  ? 'border-accent text-accent font-semibold'
+                  : 'border-transparent text-text-muted hover:text-text'
+              }`}
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span>{t('settings.tabStartup')}</span>
+            </button>
+          )}
+          {!isAndroid && (
+            <button
+              onClick={() => setActiveTab('browser')}
+              className={`flex items-center space-x-1.5 px-2.5 py-2 border-b-2 font-medium transition-colors ${
+                activeTab === 'browser'
+                  ? 'border-accent text-accent font-semibold'
+                  : 'border-transparent text-text-muted hover:text-text'
+              }`}
+            >
+              <Chrome className="w-3.5 h-3.5" />
+              <span>{t('settings.tabBrowser')}</span>
+            </button>
+          )}
           <button
             onClick={() => setActiveTab('about')}
             className={`flex items-center space-x-1.5 px-2.5 py-2 border-b-2 font-medium transition-colors ${
@@ -983,6 +993,8 @@ export const SpeedLimiterModal: React.FC<SpeedLimiterModalProps> = ({
                               ? t('update.updatingBtn', {
                                   pct: Math.round(updateProgress?.progressPercent ?? 0),
                                 })
+                              : isAndroid
+                              ? t('mobile.installApkUpdate')
                               : t('update.installNowBtn')}
                           </span>
                         </button>

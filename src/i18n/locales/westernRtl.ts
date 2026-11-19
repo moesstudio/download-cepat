@@ -424,6 +424,11 @@ export const es: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Error en la aplicación',
   'errorBoundary.desc': 'Recarga la aplicación o reinicia los datos:',
   'errorBoundary.resetBtn': 'Reiniciar datos',
+  'mobile.shareFile': 'Compartir archivo',
+  'mobile.savedToDownloads': 'Guardado en Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'El extractor de video social (yt-dlp/FFmpeg) llegará en la Fase 2 para Android. Los archivos HTTP/HTTPS directos, enlaces de video directos, FTP y BitTorrent/Magnet funcionan de forma nativa.',
+  'mobile.installApkUpdate': 'Descargar e instalar APK',
+  'mobile.navSettings': 'Ajustes',
 };
 
 export const fr: Record<TranslationKey, string> = {
@@ -850,6 +855,11 @@ export const fr: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Erreur d’application',
   'errorBoundary.desc': 'Veuillez recharger ou réinitialiser les données :',
   'errorBoundary.resetBtn': 'Réinitialiser',
+  'mobile.shareFile': 'Partager le fichier',
+  'mobile.savedToDownloads': 'Enregistré dans Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'L’extracteur vidéo social (yt-dlp/FFmpeg) est prévu pour la Phase 2 Android. Les téléchargements directs HTTP/HTTPS, vidéos directes, FTP et BitTorrent/Magnet fonctionnent nativement.',
+  'mobile.installApkUpdate': 'Télécharger et installer l’APK',
+  'mobile.navSettings': 'Paramètres',
 };
 
 export const de: Record<TranslationKey, string> = {
@@ -1276,6 +1286,11 @@ export const de: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Anwendungsfehler',
   'errorBoundary.desc': 'Bitte neu laden oder Daten zurücksetzen:',
   'errorBoundary.resetBtn': 'Zurücksetzen & Neu laden',
+  'mobile.shareFile': 'Datei teilen',
+  'mobile.savedToDownloads': 'In Downloads/Download Cepat gespeichert',
+  'mobile.videoPhase2Notice': 'Der Social-Video-Extraktor (yt-dlp/FFmpeg) folgt in Android-Phase 2. Direkte HTTP/HTTPS-Dateien, direkte Videolinks, FTP und BitTorrent/Magnet funktionieren bereits vollständig.',
+  'mobile.installApkUpdate': 'APK herunterladen & installieren',
+  'mobile.navSettings': 'Einstellungen',
 };
 
 export const pt: Record<TranslationKey, string> = {
@@ -1702,6 +1717,11 @@ export const pt: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Erro na aplicação',
   'errorBoundary.desc': 'Recarregue ou limpe os dados:',
   'errorBoundary.resetBtn': 'Resetar dados',
+  'mobile.shareFile': 'Compartilhar arquivo',
+  'mobile.savedToDownloads': 'Salvo em Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'O extrator de vídeo social (yt-dlp/FFmpeg) está planejado para a Fase 2 no Android. Arquivos diretos HTTP/HTTPS, vídeos diretos, FTP e BitTorrent/Magnet já funcionam nativamente.',
+  'mobile.installApkUpdate': 'Baixar e instalar APK',
+  'mobile.navSettings': 'Ajustes',
 };
 
 export const ru: Record<TranslationKey, string> = {
@@ -2128,6 +2148,11 @@ export const ru: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Ошибка приложения',
   'errorBoundary.desc': 'Перезагрузите или сбросьте данные:',
   'errorBoundary.resetBtn': 'Сбросить',
+  'mobile.shareFile': 'Поделиться файлом',
+  'mobile.savedToDownloads': 'Сохранено в Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'Экстрактор видео из соцсетей (yt-dlp/FFmpeg) запланирован на 2-ю фазу Android. Прямые HTTP/HTTPS-файлы, прямые видеоссылки, FTP и BitTorrent/Magnet уже работают полностью.',
+  'mobile.installApkUpdate': 'Скачать и установить APK',
+  'mobile.navSettings': 'Настройки',
 };
 
 export const ar: Record<TranslationKey, string> = {
@@ -2554,6 +2579,11 @@ export const ar: Record<TranslationKey, string> = {
   'errorBoundary.title': 'حدث خطأ في التطبيق',
   'errorBoundary.desc': 'يرجى إعادة التحميل أو مسح البيانات:',
   'errorBoundary.resetBtn': 'إعادة تعيين',
+  'mobile.shareFile': 'مشاركة الملف',
+  'mobile.savedToDownloads': 'تم الحفظ في Downloads/Download Cepat',
+  'mobile.videoPhase2Notice': 'مستخرج فيديو الشبكات الاجتماعية (yt-dlp/FFmpeg) مخطط للمرحلة الثانية على أندرويد. ملفات HTTP/HTTPS المباشرة وروابط الفيديو المباشرة وFTP وBitTorrent/Magnet تعمل بالكامل الآن.',
+  'mobile.installApkUpdate': 'تنزيل وتثبيت APK',
+  'mobile.navSettings': 'الإعدادات',
 };
 
 export const tr: Record<TranslationKey, string> = {
@@ -2980,4 +3010,9 @@ export const tr: Record<TranslationKey, string> = {
   'errorBoundary.title': 'Uygulama Hatası',
   'errorBoundary.desc': 'Yeniden yükleyin veya verileri sıfırlayın:',
   'errorBoundary.resetBtn': 'Verileri Sıfırla',
+  'mobile.shareFile': 'Dosyayı Paylaş',
+  'mobile.savedToDownloads': 'Downloads/Download Cepat içine kaydedildi',
+  'mobile.videoPhase2Notice': 'Sosyal medya video çıkarıcı (yt-dlp/FFmpeg) Android 2. Aşamada eklenecektir. Doğrudan HTTP/HTTPS dosyaları, doğrudan video bağlantıları, FTP ve BitTorrent/Magnet şu anda tam olarak desteklenmektedir.',
+  'mobile.installApkUpdate': 'APK İndir ve Yükle',
+  'mobile.navSettings': 'Ayarlar',
 };

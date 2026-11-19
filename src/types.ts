@@ -348,3 +348,8 @@ export interface UpdateInstallResult {
   message: string;
   assetPath?: string | null;
 }
+
+export interface AndroidIncomingIntent {
+  kind: 'url' | 'magnet' | 'torrent_file' | string;
+  value: string;
+}

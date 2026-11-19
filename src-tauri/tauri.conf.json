@@ -50,6 +50,9 @@
     "macOS": {
       "frameworks": [],
       "minimumSystemVersion": "10.15"
+    },
+    "android": {
+      "minSdkVersion": 26
     }
   }
 }

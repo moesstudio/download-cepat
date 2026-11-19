@@ -5,6 +5,294 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Notify;
 use core_engine::model::{InspectResult, MediaInfo, VideoFormat};
 
+mod android_bridge;
+
+#[cfg(target_os = "android")]
+static ANDROID_APP_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+#[cfg(target_os = "android")]
+static ANDROID_APP_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+mod android_runtime {
+    use super::*;
+
+    #[derive(Clone)]
+    pub struct FgsTaskSnapshot {
+        pub downloaded_bytes: u64,
+        pub total_bytes: u64,
+        pub speed_bytes_per_sec: u64,
+        pub progress_percent: f64,
+        pub title: String,
+    }
+
+    fn fgs_tasks() -> &'static Mutex<HashMap<String, FgsTaskSnapshot>> {
+        static STORE: OnceLock<Mutex<HashMap<String, FgsTaskSnapshot>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn last_sync_time() -> &'static Mutex<std::time::Instant> {
+        static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+        LAST.get_or_init(|| {
+            Mutex::new(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(5))
+                    .unwrap_or_else(std::time::Instant::now),
+            )
+        })
+    }
+
+    pub fn upsert_and_sync(
+        app: &tauri::AppHandle,
+        task_id: &str,
+        snap: FgsTaskSnapshot,
+        force: bool,
+    ) {
+        let summary = {
+            let Ok(mut map) = fgs_tasks().lock() else {
+                return;
+            };
+            map.insert(task_id.to_string(), snap);
+            compute_summary(&map)
+        };
+        dispatch_sync(app, summary, force);
+    }
+
+    pub fn remove_and_sync(app: &tauri::AppHandle, task_id: &str) {
+        let summary = {
+            let Ok(mut map) = fgs_tasks().lock() else {
+                return;
+            };
+            map.remove(task_id);
+            compute_summary(&map)
+        };
+        dispatch_sync(app, summary, true);
+    }
+
+    pub fn clear_and_sync(app: &tauri::AppHandle) {
+        let summary = {
+            let Ok(mut map) = fgs_tasks().lock() else {
+                return;
+            };
+            map.clear();
+            compute_summary(&map)
+        };
+        dispatch_sync(app, summary, true);
+    }
+
+    fn compute_summary(map: &HashMap<String, FgsTaskSnapshot>) -> (usize, u64, f64, String) {
+        let count = map.len();
+        if count == 0 {
+            return (0, 0, 0.0, String::new());
+        }
+        let mut total_speed = 0u64;
+        let mut total_dl = 0u64;
+        let mut total_size = 0u64;
+        let mut sum_pct = 0.0f64;
+        let mut first_title = String::new();
+        for snap in map.values() {
+            if first_title.is_empty() {
+                first_title = snap.title.clone();
+            }
+            total_speed = total_speed.saturating_add(snap.speed_bytes_per_sec);
+            total_dl = total_dl.saturating_add(snap.downloaded_bytes);
+            if snap.total_bytes > 0 {
+                total_size = total_size.saturating_add(snap.total_bytes);
+            }
+            sum_pct += snap.progress_percent;
+        }
+        let overall_pct = if total_size > 0 {
+            ((total_dl as f64 / total_size as f64) * 100.0).clamp(0.0, 100.0)
+        } else {
+            (sum_pct / count as f64).clamp(0.0, 100.0)
+        };
+        let title = if count == 1 {
+            first_title
+        } else {
+            format!("{} downloads active", count)
+        };
+        (count, total_speed, overall_pct, title)
+    }
+
+    fn dispatch_sync(app: &tauri::AppHandle, summary: (usize, u64, f64, String), force: bool) {
+        if !force {
+            if let Ok(mut guard) = last_sync_time().lock() {
+                let now = std::time::Instant::now();
+                if now.duration_since(*guard) < std::time::Duration::from_millis(750) {
+                    return;
+                }
+                *guard = now;
+            }
+        } else if let Ok(mut guard) = last_sync_time().lock() {
+            *guard = std::time::Instant::now();
+        }
+
+        let app_clone = app.clone();
+        let (count, speed, pct, title) = summary;
+        tauri::async_runtime::spawn(async move {
+            let _ = android_bridge::update_foreground_service(
+                &app_clone, count, speed, pct, &title,
+            )
+            .await;
+        });
+    }
+
+    fn exports_index_path() -> Option<PathBuf> {
+        ANDROID_APP_DATA_DIR
+            .get()
+            .map(|d| d.join(".download-cepat").join("android_exports.json"))
+    }
+
+    fn exports_map() -> &'static Mutex<HashMap<String, String>> {
+        static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        STORE.get_or_init(|| {
+            let loaded = exports_index_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+                .unwrap_or_default();
+            Mutex::new(loaded)
+        })
+    }
+
+    pub fn register_exported_uri(path: &str, content_uri: &str) {
+        if path.trim().is_empty() || content_uri.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = exports_map().lock() {
+            guard.insert(path.to_string(), content_uri.to_string());
+            if let Some(idx_path) = exports_index_path() {
+                if let Some(parent) = idx_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(json) = serde_json::to_string(&*guard) {
+                    let _ = std::fs::write(idx_path, json);
+                }
+            }
+        }
+    }
+
+    pub fn resolve_exported_uri(path_or_uri: &str) -> String {
+        let trimmed = path_or_uri.trim();
+        if trimmed.starts_with("content://") {
+            return trimmed.to_string();
+        }
+        if let Ok(guard) = exports_map().lock() {
+            if let Some(uri) = guard.get(trimmed) {
+                return uri.clone();
+            }
+        }
+        let resolved = resolve_path(trimmed).display().to_string();
+        if let Ok(guard) = exports_map().lock() {
+            if let Some(uri) = guard.get(&resolved) {
+                return uri.clone();
+            }
+        }
+        trimmed.to_string()
+    }
+
+    fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    collect_files_recursive(&p, out);
+                } else if p.is_file() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    pub async fn export_completed_target(
+        app: &tauri::AppHandle,
+        target: &Path,
+    ) -> Result<String, String> {
+        let staging_root = user_home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Downloads");
+
+        if target.is_file() {
+            let rel = target
+                .strip_prefix(&staging_root)
+                .ok()
+                .and_then(|r| {
+                    let s = r.to_string_lossy().replace('\\', "/");
+                    (!s.trim().is_empty()).then_some(s)
+                })
+                .unwrap_or_else(|| {
+                    target
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "download.bin".to_string())
+                });
+            let res = android_bridge::export_to_public_downloads(app, target, &rel, None).await?;
+            let preferred = res
+                .file_path
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .unwrap_or_else(|| res.display_path.clone());
+            register_exported_uri(&preferred, &res.content_uri);
+            register_exported_uri(&res.display_path, &res.content_uri);
+            let _ = std::fs::remove_file(target);
+            return Ok(preferred);
+        }
+
+        if target.is_dir() {
+            let mut files = Vec::new();
+            collect_files_recursive(target, &mut files);
+            let mut first_uri: Option<String> = None;
+            let folder_rel = target
+                .strip_prefix(&staging_root)
+                .ok()
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    target
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Torrent".to_string())
+                });
+            for file_path in &files {
+                let rel = file_path
+                    .strip_prefix(&staging_root)
+                    .ok()
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}/{}",
+                            folder_rel,
+                            file_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "file.bin".to_string())
+                        )
+                    });
+                let res =
+                    android_bridge::export_to_public_downloads(app, file_path, &rel, None).await?;
+                let file_disp = res
+                    .file_path
+                    .clone()
+                    .filter(|p| !p.trim().is_empty())
+                    .unwrap_or_else(|| res.display_path.clone());
+                register_exported_uri(&file_disp, &res.content_uri);
+                if first_uri.is_none() {
+                    first_uri = Some(res.content_uri.clone());
+                }
+            }
+            if !files.is_empty() {
+                let _ = std::fs::remove_dir_all(target);
+            }
+            let public_dir_display = format!("Downloads/Download Cepat/{}", folder_rel);
+            if let Some(uri) = first_uri {
+                register_exported_uri(&public_dir_display, &uri);
+            }
+            return Ok(public_dir_display);
+        }
+
+        Ok(target.display().to_string())
+    }
+}
+
 #[derive(Clone)]
 enum ActiveControl {
     Http(core_engine::DownloadController),
@@ -404,6 +692,7 @@ fn tray_labels_for_lang(lang: &str) -> TrayLabels {
     }
 }
 
+#[cfg(desktop)]
 struct TrayMenuState {
     show_item: tauri::menu::MenuItem<tauri::Wry>,
     add_item: tauri::menu::MenuItem<tauri::Wry>,
@@ -417,16 +706,21 @@ fn set_tray_language(app: tauri::AppHandle, lang: String) -> Result<(), String> 
     if let Ok(mut guard) = active_ui_language().lock() {
         *guard = normalized.to_string();
     }
-    let labels = tray_labels_for_lang(normalized);
-    if let Some(state) = app.try_state::<TrayMenuState>() {
-        let _ = state.show_item.set_text(labels.show);
-        let _ = state.add_item.set_text(labels.add);
-        let _ = state.pause_item.set_text(labels.pause_all);
-        let _ = state.quit_item.set_text(labels.quit);
+    #[cfg(desktop)]
+    {
+        let labels = tray_labels_for_lang(normalized);
+        if let Some(state) = app.try_state::<TrayMenuState>() {
+            let _ = state.show_item.set_text(labels.show);
+            let _ = state.add_item.set_text(labels.add);
+            let _ = state.pause_item.set_text(labels.pause_all);
+            let _ = state.quit_item.set_text(labels.quit);
+        }
+        if let Some(tray) = app.tray_by_id("dc-tray") {
+            let _ = tray.set_tooltip(Some(labels.tooltip));
+        }
     }
-    if let Some(tray) = app.tray_by_id("dc-tray") {
-        let _ = tray.set_tooltip(Some(labels.tooltip));
-    }
+    #[cfg(not(desktop))]
+    let _ = &app;
     Ok(())
 }
 
@@ -646,6 +940,12 @@ fn find_executable_in_dirs(bin_names: &[&str], extra_dirs: &[PathBuf]) -> Option
 }
 
 fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = ANDROID_APP_DATA_DIR.get() {
+            return Some(dir.clone());
+        }
+    }
     dirs::home_dir()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
@@ -2133,113 +2433,186 @@ fn normalize_platform_path(path: PathBuf) -> PathBuf {
 }
 
 #[tauri::command]
-fn open_folder(path: String) -> Result<String, String> {
-    let mut target = normalize_platform_path(resolve_path(&path));
+async fn open_folder(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let resolved = android_runtime::resolve_exported_uri(&path);
+        return android_bridge::open_content_or_file(&app, &resolved, true).await;
+    }
 
-    // If target is a file (not an existing directory with a dot in its name), reveal in Finder/Explorer/File Manager or open parent directory
-    if target.is_file() || (!target.is_dir() && target.extension().is_some()) {
-        if target.exists() {
-            #[cfg(target_os = "macos")]
-            {
-                let status = std::process::Command::new("open")
-                    .arg("-R")
-                    .arg(&target)
-                    .status();
-                if let Ok(s) = status {
-                    if s.success() {
-                        return Ok(format!("Menampilkan berkas di Finder: {}", target.display()));
+    #[cfg(desktop)]
+    {
+        let _ = &app;
+        let mut target = normalize_platform_path(resolve_path(&path));
+
+        // If target is a file (not an existing directory with a dot in its name), reveal in Finder/Explorer/File Manager or open parent directory
+        if target.is_file() || (!target.is_dir() && target.extension().is_some()) {
+            if target.exists() {
+                #[cfg(target_os = "macos")]
+                {
+                    let status = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&target)
+                        .status();
+                    if let Ok(s) = status {
+                        if s.success() {
+                            return Ok(format!("Menampilkan berkas di Finder: {}", target.display()));
+                        }
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let abs = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+                    let norm = abs.to_string_lossy().replace('/', "\\");
+                    let clean = if let Some(unc) = norm.strip_prefix(r"\\?\UNC\") {
+                        format!(r"\\{}", unc)
+                    } else {
+                        norm.strip_prefix(r"\\?\").unwrap_or(&norm).to_string()
+                    };
+                    if std::process::Command::new("explorer")
+                        .raw_arg(format!("/select,\"{}\"", clean))
+                        .spawn()
+                        .is_ok()
+                    {
+                        return Ok(format!("Membuka berkas di Explorer: {}", clean));
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let abs_target = if target.is_absolute() {
+                        target.clone()
+                    } else {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(&target))
+                            .unwrap_or_else(|_| target.clone())
+                    };
+                    let uri = path_to_file_uri(&abs_target);
+                    if let Ok(output) = std::process::Command::new("dbus-send")
+                        .args([
+                            "--session",
+                            "--dest=org.freedesktop.FileManager1",
+                            "--print-reply",
+                            "--reply-timeout=1500",
+                            "--type=method_call",
+                            "/org/freedesktop/FileManager1",
+                            "org.freedesktop.FileManager1.ShowItems",
+                            &format!("array:string:{}", uri),
+                            "string:",
+                        ])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .output()
+                    {
+                        if output.status.success() {
+                            return Ok(format!(
+                                "Menampilkan berkas di File Manager: {}",
+                                target.display()
+                            ));
+                        }
                     }
                 }
             }
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let abs = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
-                let norm = abs.to_string_lossy().replace('/', "\\");
-                let clean = if let Some(unc) = norm.strip_prefix(r"\\?\UNC\") {
-                    format!(r"\\{}", unc)
-                } else {
-                    norm.strip_prefix(r"\\?\").unwrap_or(&norm).to_string()
-                };
-                if std::process::Command::new("explorer")
-                    .raw_arg(format!("/select,\"{}\"", clean))
-                    .spawn()
-                    .is_ok()
-                {
-                    return Ok(format!("Membuka berkas di Explorer: {}", clean));
-                }
-            }
-            #[cfg(target_os = "linux")]
-            {
-                let abs_target = if target.is_absolute() {
-                    target.clone()
-                } else {
-                    std::env::current_dir()
-                        .map(|cwd| cwd.join(&target))
-                        .unwrap_or_else(|_| target.clone())
-                };
-                let uri = path_to_file_uri(&abs_target);
-                if let Ok(output) = std::process::Command::new("dbus-send")
-                    .args([
-                        "--session",
-                        "--dest=org.freedesktop.FileManager1",
-                        "--print-reply",
-                        "--reply-timeout=1500",
-                        "--type=method_call",
-                        "/org/freedesktop/FileManager1",
-                        "org.freedesktop.FileManager1.ShowItems",
-                        &format!("array:string:{}", uri),
-                        "string:",
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .output()
-                {
-                    if output.status.success() {
-                        return Ok(format!(
-                            "Menampilkan berkas di File Manager: {}",
-                            target.display()
-                        ));
-                    }
-                }
+            if let Some(parent) = target.parent() {
+                target = parent.to_path_buf();
             }
         }
-        if let Some(parent) = target.parent() {
-            target = parent.to_path_buf();
+
+        // Ensure the folder exists
+        if !target.exists() {
+            let _ = std::fs::create_dir_all(&target);
         }
+
+        return open::that(&target)
+            .map(|_| format!("Folder berhasil dibuka: {}", target.display()))
+            .map_err(|e| format!("Gagal membuka folder ({}): {}", target.display(), e));
     }
 
-    // Ensure the folder exists
-    if !target.exists() {
-        let _ = std::fs::create_dir_all(&target);
+    #[cfg(not(any(desktop, target_os = "android")))]
+    {
+        let _ = (&app, &path);
+        Err("Opening folders is not supported on this platform".to_string())
     }
-
-    open::that(&target)
-        .map(|_| format!("Folder berhasil dibuka: {}", target.display()))
-        .map_err(|e| format!("Gagal membuka folder ({}): {}", target.display(), e))
 }
 
 #[tauri::command]
-fn open_file(path: String) -> Result<String, String> {
-    let target = normalize_platform_path(resolve_path(&path));
-
-    if !target.exists() {
-        // If file is missing, open parent folder to show where it belongs
-        if let Some(parent) = target.parent() {
-            if !parent.exists() {
-                let _ = std::fs::create_dir_all(parent);
+async fn open_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let resolved = android_runtime::resolve_exported_uri(&path);
+        let arg = if resolved.starts_with("content://") {
+            resolved
+        } else {
+            let p = normalize_platform_path(resolve_path(&path));
+            if p.exists() {
+                p.display().to_string()
+            } else {
+                resolved
             }
-            let _ = open::that(parent);
-        }
-        return Err(format!(
-            "Berkas '{}' belum selesai diunduh atau belum ada di disk. Folder penyimpanan telah dibuka.",
-            target.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        };
+        return android_bridge::open_content_or_file(&app, &arg, false).await;
     }
 
-    open::that(&target)
-        .map(|_| format!("Berkas berhasil dibuka: {}", target.display()))
-        .map_err(|e| format!("Gagal membuka berkas ({}): {}", target.display(), e))
+    #[cfg(desktop)]
+    {
+        let _ = &app;
+        let target = normalize_platform_path(resolve_path(&path));
+
+        if !target.exists() {
+            // If file is missing, open parent folder to show where it belongs
+            if let Some(parent) = target.parent() {
+                if !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = open::that(parent);
+            }
+            return Err(format!(
+                "Berkas '{}' belum selesai diunduh atau belum ada di disk. Folder penyimpanan telah dibuka.",
+                target.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+
+        return open::that(&target)
+            .map(|_| format!("Berkas berhasil dibuka: {}", target.display()))
+            .map_err(|e| format!("Gagal membuka berkas ({}): {}", target.display(), e));
+    }
+
+    #[cfg(not(any(desktop, target_os = "android")))]
+    {
+        let _ = (&app, &path);
+        Err("Opening files is not supported on this platform".to_string())
+    }
+}
+
+#[tauri::command]
+async fn share_downloaded_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let resolved = android_runtime::resolve_exported_uri(&path);
+        let arg = if resolved.starts_with("content://") {
+            resolved
+        } else {
+            let p = normalize_platform_path(resolve_path(&path));
+            if p.exists() {
+                p.display().to_string()
+            } else {
+                resolved
+            }
+        };
+        return android_bridge::share_content_or_file(&app, &arg).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, &path);
+        Err("Share sheet is only available on Android".to_string())
+    }
+}
+
+#[tauri::command]
+async fn consume_android_pending_intents(
+    app: tauri::AppHandle,
+) -> Vec<android_bridge::AndroidIncomingIntent> {
+    android_bridge::consume_pending_intents(&app).await
 }
 
 fn dir_size_bytes(dir: &Path) -> u64 {
@@ -3806,6 +4179,25 @@ async fn start_real_download_with_controller(
                 || format_id.as_deref().map_or(false, |f| !f.trim().is_empty()));
 
         if is_video_or_stream {
+            #[cfg(target_os = "android")]
+            {
+                unregister_active_download(&task_id);
+                remove_task_target(&task_id);
+                emit_simple_telemetry(
+                    &app,
+                    &task_id,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    None,
+                    "error",
+                    &target,
+                    Some("ANDROID_VIDEO_PHASE2: Ekstraktor video sosial (yt-dlp/FFmpeg) akan hadir di Fase 2 Android. Saat ini mendukung file HTTP/HTTPS, direct video, FTP, dan BitTorrent/Magnet.".to_string()),
+                );
+                return;
+            }
+
             // Emit initial progress immediately
             emit_simple_telemetry(
                 &app,
@@ -4591,11 +4983,32 @@ async fn start_real_download_with_controller(
             );
         }
 
+        #[cfg(target_os = "android")]
+        let android_title = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Download Cepat".to_string());
+        #[cfg(target_os = "android")]
+        android_runtime::upsert_and_sync(
+            &app,
+            &task_id,
+            android_runtime::FgsTaskSnapshot {
+                downloaded_bytes: 0,
+                total_bytes: file_size.unwrap_or(0),
+                speed_bytes_per_sec: 0,
+                progress_percent: 1.0,
+                title: android_title.clone(),
+            },
+            true,
+        );
+
         let (tx, mut rx) = tokio::sync::broadcast::channel::<core_engine::model::ProgressTelemetry>(128);
 
         // Forward telemetry to Tauri frontend (including real ETA, peers/seeds, and per-thread segments!)
         let app_clone = app.clone();
         let target_str = target.display().to_string();
+        #[cfg(target_os = "android")]
+        let android_title_monitor = android_title.clone();
         let monitor_handle = tokio::spawn(async move {
             let mut last_downloaded = 0u64;
             let mut last_total = 0u64;
@@ -4613,6 +5026,25 @@ async fn start_real_download_with_controller(
                         | core_engine::model::TaskStatus::Paused
                         | core_engine::model::TaskStatus::Canceled
                 );
+                #[cfg(target_os = "android")]
+                {
+                    if is_terminal {
+                        android_runtime::remove_and_sync(&app_clone, &telem.task_id);
+                    } else {
+                        android_runtime::upsert_and_sync(
+                            &app_clone,
+                            &telem.task_id,
+                            android_runtime::FgsTaskSnapshot {
+                                downloaded_bytes: telem.downloaded_bytes,
+                                total_bytes: telem.total_bytes.unwrap_or(0),
+                                speed_bytes_per_sec: telem.speed_bytes_per_sec,
+                                progress_percent: telem.progress_percent as f64,
+                                title: android_title_monitor.clone(),
+                            },
+                            false,
+                        );
+                    }
+                }
                 let segments_payload: Vec<SegmentProgressPayload> = telem
                     .segments
                     .into_iter()
@@ -4700,6 +5132,8 @@ async fn start_real_download_with_controller(
 
         let (last_downloaded, last_total) = monitor_handle.await.unwrap_or((0, 0));
         unregister_active_download(&task_id);
+        #[cfg(target_os = "android")]
+        android_runtime::remove_and_sync(&app, &task_id);
 
         if controller.is_canceled() {
             remove_task_target(&task_id);
@@ -4720,6 +5154,23 @@ async fn start_real_download_with_controller(
                 } else {
                     last_total.max(last_downloaded)
                 };
+                #[allow(unused_mut)]
+                let mut final_dest_path = target.clone();
+                #[cfg(target_os = "android")]
+                {
+                    match android_runtime::export_completed_target(&app, &target).await {
+                        Ok(exported_path) => {
+                            final_dest_path = PathBuf::from(exported_path);
+                        }
+                        Err(export_err) => {
+                            log::warn!(
+                                "MediaStore export failed for {}, keeping staging path: {}",
+                                target.display(),
+                                export_err
+                            );
+                        }
+                    }
+                }
                 emit_simple_telemetry(
                     &app,
                     &task_id,
@@ -4729,7 +5180,7 @@ async fn start_real_download_with_controller(
                     100.0,
                     Some(0),
                     "completed",
-                    &target,
+                    &final_dest_path,
                     None,
                 );
             }
@@ -4791,6 +5242,11 @@ async fn inspect_url(
     }
 
     if is_video_or_stream_url(&url) {
+        #[cfg(target_os = "android")]
+        {
+            return Err("ANDROID_VIDEO_PHASE2: Ekstraktor video sosial (yt-dlp/FFmpeg) akan hadir di Fase 2 Android. Saat ini mendukung file HTTP/HTTPS, direct video, FTP, dan BitTorrent/Magnet.".to_string());
+        }
+        #[cfg(not(target_os = "android"))]
         match inspect_video_url_with_options(
             &url,
             cookie.as_deref(),
@@ -4884,8 +5340,7 @@ fn update_download_speed_limit(task_id: Option<String>, limit_kbs: u64) -> usize
     updated
 }
 
-#[tauri::command]
-async fn verify_file_checksum(path: String) -> Result<core_engine::model::FileChecksums, String> {
+async fn verify_file_checksum_local(path: String) -> Result<core_engine::model::FileChecksums, String> {
     let target = resolve_path(&path);
     tokio::task::spawn_blocking(move || {
         core_engine::integrity::compute_file_checksums(&target)
@@ -4893,6 +5348,28 @@ async fn verify_file_checksum(path: String) -> Result<core_engine::model::FileCh
     })
     .await
     .map_err(|e| format!("Task checksum gagal: {}", e))?
+}
+
+#[tauri::command]
+async fn verify_file_checksum(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<core_engine::model::FileChecksums, String> {
+    match verify_file_checksum_local(path.clone()).await {
+        Ok(sums) => Ok(sums),
+        Err(err) => {
+            #[cfg(target_os = "android")]
+            {
+                let resolved = android_runtime::resolve_exported_uri(&path);
+                if let Ok(sums) = android_bridge::compute_content_checksums(&app, &resolved).await {
+                    return Ok(sums);
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = &app;
+            Err(err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -4989,7 +5466,15 @@ fn rename_or_move_download(old_path: String, new_path: String) -> Result<String,
 }
 
 #[tauri::command]
-async fn read_clipboard_text() -> Result<String, String> {
+async fn read_clipboard_text(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        return android_bridge::read_clipboard_text(&app).await;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    let _ = &app;
+
     #[cfg(target_os = "macos")]
     {
         return tokio::task::spawn_blocking(|| {
@@ -6014,21 +6499,40 @@ pub fn maybe_run_native_messaging_host() -> bool {
 
 #[tauri::command]
 fn install_browser_extension_host() -> Result<String, String> {
-    let installed_count = sync_native_messaging_hosts()?;
-    let ext_count = sync_external_extensions();
-    Ok(format!(
-        "Konektor native berhasil dipasang ke {} browser dan {} konfigurasi External Extensions aktif.",
-        installed_count, ext_count
-    ))
+    #[cfg(desktop)]
+    {
+        let installed_count = sync_native_messaging_hosts()?;
+        let ext_count = sync_external_extensions();
+        Ok(format!(
+            "Konektor native berhasil dipasang ke {} browser dan {} konfigurasi External Extensions aktif.",
+            installed_count, ext_count
+        ))
+    }
+    #[cfg(not(desktop))]
+    {
+        Err("Ekstensi Chrome Desktop tidak didukung di perangkat seluler. Gunakan menu Share Android atau tautan magnet/.torrent.".to_string())
+    }
 }
 
 #[tauri::command]
-fn open_external_url(url: String) -> Result<String, String> {
-    if url.starts_with("http://") || url.starts_with("https://") {
+async fn open_external_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("URL harus berawalan http:// atau https://".to_string());
+    }
+    #[cfg(target_os = "android")]
+    {
+        return android_bridge::open_external_url(&app, &url).await;
+    }
+    #[cfg(desktop)]
+    {
+        let _ = &app;
         open::that(&url).map_err(|e| format!("Gagal membuka URL: {}", e))?;
         Ok(format!("URL dibuka di browser: {}", url))
-    } else {
-        Err("URL harus berawalan http:// atau https://".to_string())
+    }
+    #[cfg(not(any(desktop, target_os = "android")))]
+    {
+        let _ = (&app, &url);
+        Err("Opening external URLs is not supported on this platform".to_string())
     }
 }
 
@@ -6236,7 +6740,20 @@ async fn download_and_install_app_update(app: tauri::AppHandle) -> Result<Update
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download-cepat-update.bin".to_string());
 
-    let update_dir = std::env::temp_dir().join("download-cepat-updates");
+    let update_dir = {
+        #[cfg(target_os = "android")]
+        {
+            ANDROID_APP_CACHE_DIR
+                .get()
+                .cloned()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("updates")
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            std::env::temp_dir().join("download-cepat-updates")
+        }
+    };
     let dest_path = normalize_platform_path(update_dir.join(&safe_name));
     let known_total = info.asset_size;
 
@@ -6595,9 +7112,18 @@ fi
         });
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "android")]
     {
-        let _ = open::that(&dest_path);
+        let install_msg = android_bridge::install_apk_update(&app, &dest_path).await?;
+        return Ok(UpdateInstallResult {
+            started_in_place: true,
+            message: install_msg,
+            asset_path: Some(dest_path.display().to_string()),
+        });
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "android")))]
+    {
         Ok(UpdateInstallResult {
             started_in_place: false,
             message: format!(
@@ -6627,65 +7153,74 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[tauri::command]
 fn open_extension_folder(app: tauri::AppHandle) -> Result<String, String> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(res_dir) = app.path().resource_dir() {
-        candidates.push(res_dir.join("extension"));
-        candidates.push(res_dir.join("_up_").join("extension"));
+    #[cfg(not(desktop))]
+    {
+        let _ = &app;
+        return Err("Folder ekstensi browser hanya tersedia untuk versi desktop.".to_string());
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.push(exe_dir.join("extension"));
-            candidates.push(exe_dir.join("resources").join("extension"));
-            for ancestor in exe_dir.ancestors().take(4) {
-                candidates.push(ancestor.join("extension"));
+
+    #[cfg(desktop)]
+    {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(res_dir) = app.path().resource_dir() {
+            candidates.push(res_dir.join("extension"));
+            candidates.push(res_dir.join("_up_").join("extension"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                candidates.push(exe_dir.join("extension"));
+                candidates.push(exe_dir.join("resources").join("extension"));
+                for ancestor in exe_dir.ancestors().take(4) {
+                    candidates.push(ancestor.join("extension"));
+                }
             }
         }
-    }
-    if let Some(manifest_ext) = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|p| p.join("extension"))
-    {
-        candidates.push(manifest_ext);
-    }
-    candidates.push(resolve_path("~/.download-cepat/extension"));
+        if let Some(manifest_ext) = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("extension"))
+        {
+            candidates.push(manifest_ext);
+        }
+        candidates.push(resolve_path("~/.download-cepat/extension"));
 
-    let mut found = candidates
-        .into_iter()
-        .find(|p| p.is_dir() && p.join("manifest.json").is_file())
-        .ok_or_else(|| {
-            "Folder ekstensi tidak ditemukan di paket aplikasi. Anda juga dapat memasang langsung dari Chrome Web Store."
-                .to_string()
-        })?;
+        let mut found = candidates
+            .into_iter()
+            .find(|p| p.is_dir() && p.join("manifest.json").is_file())
+            .ok_or_else(|| {
+                "Folder ekstensi tidak ditemukan di paket aplikasi. Anda juga dapat memasang langsung dari Chrome Web Store."
+                    .to_string()
+            })?;
 
-    #[cfg(target_os = "linux")]
-    {
-        let found_str = found.to_string_lossy();
-        if found_str.starts_with("/tmp/.mount_") || found_str.starts_with("/usr/") {
-            let persistent = resolve_path("~/.download-cepat/extension");
-            if copy_dir_recursive(&found, &persistent).is_ok()
-                && persistent.join("manifest.json").is_file()
-            {
-                found = persistent;
+        #[cfg(target_os = "linux")]
+        {
+            let found_str = found.to_string_lossy();
+            if found_str.starts_with("/tmp/.mount_") || found_str.starts_with("/usr/") {
+                let persistent = resolve_path("~/.download-cepat/extension");
+                if copy_dir_recursive(&found, &persistent).is_ok()
+                    && persistent.join("manifest.json").is_file()
+                {
+                    found = persistent;
+                }
             }
         }
+
+        found = normalize_platform_path(found);
+        open::that(&found)
+            .map_err(|e| format!("Gagal membuka folder ekstensi ({}): {}", found.display(), e))?;
+
+        #[cfg(target_os = "macos")]
+        return Ok(format!("Folder ekstensi dibuka di Finder: {}", found.display()));
+        #[cfg(target_os = "windows")]
+        return Ok(format!(
+            "Folder ekstensi dibuka di File Explorer: {}",
+            found.display()
+        ));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        return Ok(format!(
+            "Folder ekstensi dibuka di File Manager: {}",
+            found.display()
+        ));
     }
-
-    found = normalize_platform_path(found);
-    open::that(&found)
-        .map_err(|e| format!("Gagal membuka folder ekstensi ({}): {}", found.display(), e))?;
-
-    #[cfg(target_os = "macos")]
-    return Ok(format!("Folder ekstensi dibuka di Finder: {}", found.display()));
-    #[cfg(target_os = "windows")]
-    return Ok(format!(
-        "Folder ekstensi dibuka di File Explorer: {}",
-        found.display()
-    ));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    return Ok(format!(
-        "Folder ekstensi dibuka di File Manager: {}",
-        found.display()
-    ));
 }
 
 fn url_decode(s: &str) -> String {
@@ -7213,56 +7748,65 @@ async fn create_popup_webview_window(
     min_height: f64,
     stagger_idx: usize,
 ) -> Result<(), String> {
-    let app_clone = app.clone();
-    let label = popup_id.to_string();
-    let win_title = title.to_string();
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, popup_id, title, width, height, min_width, min_height, stagger_idx);
+        return Err("MOBILE_INLINE_MODAL".to_string());
+    }
 
-    tokio::task::spawn_blocking(move || {
-        #[cfg(target_os = "macos")]
-        let _ = app_clone.set_activation_policy(tauri::ActivationPolicy::Regular);
+    #[cfg(desktop)]
+    {
+        let app_clone = app.clone();
+        let label = popup_id.to_string();
+        let win_title = title.to_string();
 
-        let url_str = format!("index.html?window=popup&popupId={}", label);
-        let mut builder = tauri::WebviewWindowBuilder::new(
-            &app_clone,
-            label,
-            tauri::WebviewUrl::App(PathBuf::from(url_str)),
-        )
-        .title(win_title)
-        .inner_size(width, height)
-        .min_inner_size(min_width, min_height)
-        .resizable(true)
-        .minimizable(true)
-        .maximizable(true)
-        .closable(true)
-        .decorations(true)
-        .focused(true)
-        .visible(true);
+        tokio::task::spawn_blocking(move || {
+            #[cfg(target_os = "macos")]
+            let _ = app_clone.set_activation_policy(tauri::ActivationPolicy::Regular);
 
-        if let Ok(Some(monitor)) = app_clone.primary_monitor() {
-            let wa = monitor.work_area();
-            let scale = monitor.scale_factor();
-            let (x, y) = compute_popup_position(
-                wa.position.x,
-                wa.position.y,
-                wa.size.width,
-                wa.size.height,
-                scale,
-                width,
-                height,
-                stagger_idx,
-            );
-            builder = builder.position(x, y);
-        } else {
-            builder = builder.center();
-        }
+            let url_str = format!("index.html?window=popup&popupId={}", label);
+            let mut builder = tauri::WebviewWindowBuilder::new(
+                &app_clone,
+                label,
+                tauri::WebviewUrl::App(PathBuf::from(url_str)),
+            )
+            .title(win_title)
+            .inner_size(width, height)
+            .min_inner_size(min_width, min_height)
+            .resizable(true)
+            .minimizable(true)
+            .maximizable(true)
+            .closable(true)
+            .decorations(true)
+            .focused(true)
+            .visible(true);
 
-        builder
-            .build()
-            .map(|_| ())
-            .map_err(|e| format!("Failed creating popup window: {}", e))
-    })
-    .await
-    .map_err(|e| format!("Failed joining popup window task: {}", e))?
+            if let Ok(Some(monitor)) = app_clone.primary_monitor() {
+                let wa = monitor.work_area();
+                let scale = monitor.scale_factor();
+                let (x, y) = compute_popup_position(
+                    wa.position.x,
+                    wa.position.y,
+                    wa.size.width,
+                    wa.size.height,
+                    scale,
+                    width,
+                    height,
+                    stagger_idx,
+                );
+                builder = builder.position(x, y);
+            } else {
+                builder = builder.center();
+            }
+
+            builder
+                .build()
+                .map(|_| ())
+                .map_err(|e| format!("Failed creating popup window: {}", e))
+        })
+        .await
+        .map_err(|e| format!("Failed joining popup window task: {}", e))?
+    }
 }
 
 async fn update_popup_window_for_mini_progress(
@@ -7270,34 +7814,44 @@ async fn update_popup_window_for_mini_progress(
     popup_id: &str,
     file_name: &str,
 ) {
-    let app_clone = app.clone();
-    let label = popup_id.to_string();
-    let title = if file_name.trim().is_empty() {
-        "Downloading - Download Cepat".to_string()
-    } else {
-        format!("{} - Download Cepat", file_name.trim())
-    };
-    let _ = tokio::task::spawn_blocking(move || {
-        if let Some(win) = app_clone.get_webview_window(&label) {
-            let _ = win.set_min_size(Some(tauri::LogicalSize::new(440.0, 300.0)));
-            let _ = win.set_size(tauri::LogicalSize::new(520.0, 360.0));
-            let _ = win.set_title(&title);
-            let _ = win.unminimize();
-            let _ = win.show();
-        }
-    })
-    .await;
+    #[cfg(desktop)]
+    {
+        let app_clone = app.clone();
+        let label = popup_id.to_string();
+        let title = if file_name.trim().is_empty() {
+            "Downloading - Download Cepat".to_string()
+        } else {
+            format!("{} - Download Cepat", file_name.trim())
+        };
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(win) = app_clone.get_webview_window(&label) {
+                let _ = win.set_min_size(Some(tauri::LogicalSize::new(440.0, 300.0)));
+                let _ = win.set_size(tauri::LogicalSize::new(520.0, 360.0));
+                let _ = win.set_title(&title);
+                let _ = win.unminimize();
+                let _ = win.show();
+            }
+        })
+        .await;
+    }
+    #[cfg(not(desktop))]
+    let _ = (app, popup_id, file_name);
 }
 
 async fn close_popup_window_by_label(app: &tauri::AppHandle, popup_id: &str) {
-    let app_clone = app.clone();
-    let label = popup_id.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        if let Some(win) = app_clone.get_webview_window(&label) {
-            let _ = win.close();
-        }
-    })
-    .await;
+    #[cfg(desktop)]
+    {
+        let app_clone = app.clone();
+        let label = popup_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(win) = app_clone.get_webview_window(&label) {
+                let _ = win.close();
+            }
+        })
+        .await;
+    }
+    #[cfg(not(desktop))]
+    let _ = (app, popup_id);
 }
 
 fn emit_prebuffer_update(
@@ -8068,6 +8622,12 @@ async fn open_download_popup(
     app: tauri::AppHandle,
     params: OpenDownloadPopupParams,
 ) -> Result<String, String> {
+    #[cfg(not(desktop))]
+    {
+        let _ = (&app, &params);
+        return Err("MOBILE_INLINE_MODAL".to_string());
+    }
+    #[cfg(desktop)]
     spawn_download_popup(&app, params).await
 }
 
@@ -8454,14 +9014,22 @@ fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn minimize_popup_window(app: tauri::AppHandle, popup_id: String) -> Result<(), String> {
-    let app_clone = app.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Some(win) = app_clone.get_webview_window(&popup_id) {
-            let _ = win.minimize();
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed minimizing popup window: {}", e))
+    #[cfg(desktop)]
+    {
+        let app_clone = app.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(win) = app_clone.get_webview_window(&popup_id) {
+                let _ = win.minimize();
+            }
+        })
+        .await
+        .map_err(|e| format!("Failed minimizing popup window: {}", e))
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, popup_id);
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -8931,21 +9499,27 @@ async fn start_browser_bridge_server(app: tauri::AppHandle) {
 }
 
 fn show_main_window(app_handle: &tauri::AppHandle) {
-    let handle = app_handle.clone();
-    let _ = app_handle.run_on_main_thread(move || {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = handle.set_activation_policy(tauri::ActivationPolicy::Regular);
-            let _ = handle.show();
-        }
-        if let Some(win) = handle.get_webview_window("main") {
-            let _ = win.unminimize();
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
-    });
+    #[cfg(desktop)]
+    {
+        let handle = app_handle.clone();
+        let _ = app_handle.run_on_main_thread(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = handle.set_activation_policy(tauri::ActivationPolicy::Regular);
+                let _ = handle.show();
+            }
+            if let Some(win) = handle.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        });
+    }
+    #[cfg(not(desktop))]
+    let _ = app_handle;
 }
 
+#[cfg(desktop)]
 fn hide_main_window_to_tray(window: &tauri::Window) {
     let _ = window.hide();
     #[cfg(target_os = "macos")]
@@ -8971,9 +9545,12 @@ fn load_tray_icon_image() -> Option<tauri::image::Image<'static>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(android_bridge::init())
         .invoke_handler(tauri::generate_handler![
             open_folder,
             open_file,
+            share_downloaded_file,
+            consume_android_pending_intents,
             check_file_exists,
             start_real_download,
             pause_real_download,
@@ -9019,146 +9596,169 @@ pub fn run() {
                 )?;
             }
 
-            let _ = cleanup_stale_prebuffer_dir();
-
-            let initial_labels = tray_labels_for_lang("en");
-            if let Ok((tray_menu, tray_state)) = (|| -> Result<(tauri::menu::Menu<tauri::Wry>, TrayMenuState), tauri::Error> {
-                let show_item = tauri::menu::MenuItemBuilder::with_id("tray_show", initial_labels.show).build(app)?;
-                let add_item = tauri::menu::MenuItemBuilder::with_id("tray_add", initial_labels.add).build(app)?;
-                let pause_item = tauri::menu::MenuItemBuilder::with_id("tray_pause_all", initial_labels.pause_all).build(app)?;
-                let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
-                let quit_item = tauri::menu::MenuItemBuilder::with_id("tray_quit", initial_labels.quit).build(app)?;
-                let menu = tauri::menu::MenuBuilder::new(app)
-                    .items(&[&show_item, &add_item, &pause_item, &sep, &quit_item])
-                    .build()?;
-                Ok((
-                    menu,
-                    TrayMenuState {
-                        show_item,
-                        add_item,
-                        pause_item,
-                        quit_item,
-                    },
-                ))
-            })() {
-                app.manage(tray_state);
-                let mut builder = tauri::tray::TrayIconBuilder::with_id("dc-tray")
-                    .tooltip(initial_labels.tooltip)
-                    .menu(&tray_menu)
-                    .show_menu_on_left_click(false)
-                    .icon_as_template(cfg!(target_os = "macos"))
-                    .on_menu_event(|app_handle, event| match event.id().as_ref() {
-                        "tray_show" => {
-                            show_main_window(app_handle);
-                        }
-                        "tray_add" => {
-                            let handle_for_popup = app_handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let params = OpenDownloadPopupParams {
-                                    source: Some("tray".to_string()),
-                                    initial_mode: Some("url".to_string()),
-                                    url: None,
-                                    file_name: None,
-                                    cookie: None,
-                                    referer: None,
-                                    user_agent: None,
-                                    file_size: None,
-                                    mime_type: None,
-                                };
-                                if spawn_download_popup(&handle_for_popup, params).await.is_err() {
-                                    show_main_window(&handle_for_popup);
-                                    let _ = handle_for_popup.emit("tray-add-url", ());
-                                }
-                            });
-                        }
-                        "tray_pause_all" => {
-                            let controls: Vec<ActiveControl> = active_downloads()
-                                .lock()
-                                .map(|m| m.values().cloned().collect())
-                                .unwrap_or_default();
-                            for ctrl in controls {
-                                ctrl.pause();
-                            }
-                            let _ = app_handle.emit("tray-pause-all", ());
-                        }
-                        "tray_quit" => {
-                            app_handle.exit(0);
-                        }
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| match event {
-                        tauri::tray::TrayIconEvent::Click {
-                            button: tauri::tray::MouseButton::Left,
-                            button_state: tauri::tray::MouseButtonState::Up,
-                            ..
-                        }
-                        | tauri::tray::TrayIconEvent::DoubleClick {
-                            button: tauri::tray::MouseButton::Left,
-                            ..
-                        } => {
-                            show_main_window(tray.app_handle());
-                        }
-                        _ => {}
-                    });
-
-                if let Some(icon) = load_tray_icon_image().or_else(|| app.default_window_icon().cloned()) {
-                    builder = builder.icon(icon);
+            #[cfg(target_os = "android")]
+            {
+                if let Ok(data_dir) = app.path().app_data_dir() {
+                    let _ = std::fs::create_dir_all(data_dir.join("Downloads"));
+                    let _ = std::fs::create_dir_all(data_dir.join(".download-cepat"));
+                    let _ = ANDROID_APP_DATA_DIR.set(data_dir);
                 }
-
-                app.manage(tray_menu);
-                if let Err(err) = builder.build(app) {
-                    log::warn!("Gagal membuat ikon taskbar Download Cepat: {}", err);
+                if let Ok(cache_dir) = app.path().app_cache_dir() {
+                    let _ = std::fs::create_dir_all(cache_dir.join("updates"));
+                    let _ = std::fs::create_dir_all(cache_dir.join("incoming"));
+                    let _ = ANDROID_APP_CACHE_DIR.set(cache_dir);
                 }
+                let app_for_pause = app.handle().clone();
+                android_bridge::set_pause_all_handler(move || {
+                    let _ = stop_all_real_downloads();
+                    android_runtime::clear_and_sync(&app_for_pause);
+                });
             }
 
-            let handle = app.handle().clone();
-            std::thread::spawn(|| {
-                let _ = sync_native_messaging_hosts();
-            });
-            tauri::async_runtime::spawn(async {
-                let ytdlp_fut = async {
-                    if core_engine::video_runtime::ytdlp_onedir_spec(
-                        std::env::consts::OS,
-                        std::env::consts::ARCH,
-                    )
-                    .is_some()
-                        && get_ytdlp_onedir_bin().is_none()
-                    {
-                        if let Err(e) = upgrade_ytdlp_to_onedir_if_needed().await {
-                            log::warn!("Upgrade yt-dlp onedir awal belum berhasil: {}", e);
-                            if get_ytdlp_bin().is_none() {
-                                if let Err(e2) = ensure_ytdlp_bin().await {
-                                    log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e2);
+            let _ = cleanup_stale_prebuffer_dir();
+
+            #[cfg(desktop)]
+            {
+                let initial_labels = tray_labels_for_lang("en");
+                if let Ok((tray_menu, tray_state)) = (|| -> Result<(tauri::menu::Menu<tauri::Wry>, TrayMenuState), tauri::Error> {
+                    let show_item = tauri::menu::MenuItemBuilder::with_id("tray_show", initial_labels.show).build(app)?;
+                    let add_item = tauri::menu::MenuItemBuilder::with_id("tray_add", initial_labels.add).build(app)?;
+                    let pause_item = tauri::menu::MenuItemBuilder::with_id("tray_pause_all", initial_labels.pause_all).build(app)?;
+                    let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
+                    let quit_item = tauri::menu::MenuItemBuilder::with_id("tray_quit", initial_labels.quit).build(app)?;
+                    let menu = tauri::menu::MenuBuilder::new(app)
+                        .items(&[&show_item, &add_item, &pause_item, &sep, &quit_item])
+                        .build()?;
+                    Ok((
+                        menu,
+                        TrayMenuState {
+                            show_item,
+                            add_item,
+                            pause_item,
+                            quit_item,
+                        },
+                    ))
+                })() {
+                    app.manage(tray_state);
+                    let mut builder = tauri::tray::TrayIconBuilder::with_id("dc-tray")
+                        .tooltip(initial_labels.tooltip)
+                        .menu(&tray_menu)
+                        .show_menu_on_left_click(false)
+                        .icon_as_template(cfg!(target_os = "macos"))
+                        .on_menu_event(|app_handle, event| match event.id().as_ref() {
+                            "tray_show" => {
+                                show_main_window(app_handle);
+                            }
+                            "tray_add" => {
+                                let handle_for_popup = app_handle.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let params = OpenDownloadPopupParams {
+                                        source: Some("tray".to_string()),
+                                        initial_mode: Some("url".to_string()),
+                                        url: None,
+                                        file_name: None,
+                                        cookie: None,
+                                        referer: None,
+                                        user_agent: None,
+                                        file_size: None,
+                                        mime_type: None,
+                                    };
+                                    if spawn_download_popup(&handle_for_popup, params).await.is_err() {
+                                        show_main_window(&handle_for_popup);
+                                        let _ = handle_for_popup.emit("tray-add-url", ());
+                                    }
+                                });
+                            }
+                            "tray_pause_all" => {
+                                let controls: Vec<ActiveControl> = active_downloads()
+                                    .lock()
+                                    .map(|m| m.values().cloned().collect())
+                                    .unwrap_or_default();
+                                for ctrl in controls {
+                                    ctrl.pause();
+                                }
+                                let _ = app_handle.emit("tray-pause-all", ());
+                            }
+                            "tray_quit" => {
+                                app_handle.exit(0);
+                            }
+                            _ => {}
+                        })
+                        .on_tray_icon_event(|tray, event| match event {
+                            tauri::tray::TrayIconEvent::Click {
+                                button: tauri::tray::MouseButton::Left,
+                                button_state: tauri::tray::MouseButtonState::Up,
+                                ..
+                            }
+                            | tauri::tray::TrayIconEvent::DoubleClick {
+                                button: tauri::tray::MouseButton::Left,
+                                ..
+                            } => {
+                                show_main_window(tray.app_handle());
+                            }
+                            _ => {}
+                        });
+
+                    if let Some(icon) = load_tray_icon_image().or_else(|| app.default_window_icon().cloned()) {
+                        builder = builder.icon(icon);
+                    }
+
+                    app.manage(tray_menu);
+                    if let Err(err) = builder.build(app) {
+                        log::warn!("Gagal membuat ikon taskbar Download Cepat: {}", err);
+                    }
+                }
+
+                let handle = app.handle().clone();
+                std::thread::spawn(|| {
+                    let _ = sync_native_messaging_hosts();
+                });
+                tauri::async_runtime::spawn(async {
+                    let ytdlp_fut = async {
+                        if core_engine::video_runtime::ytdlp_onedir_spec(
+                            std::env::consts::OS,
+                            std::env::consts::ARCH,
+                        )
+                        .is_some()
+                            && get_ytdlp_onedir_bin().is_none()
+                        {
+                            if let Err(e) = upgrade_ytdlp_to_onedir_if_needed().await {
+                                log::warn!("Upgrade yt-dlp onedir awal belum berhasil: {}", e);
+                                if get_ytdlp_bin().is_none() {
+                                    if let Err(e2) = ensure_ytdlp_bin().await {
+                                        log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e2);
+                                    }
                                 }
                             }
+                        } else if get_ytdlp_bin().is_none() {
+                            if let Err(e) = ensure_ytdlp_bin().await {
+                                log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e);
+                            }
                         }
-                    } else if get_ytdlp_bin().is_none() {
-                        if let Err(e) = ensure_ytdlp_bin().await {
-                            log::warn!("Auto-provisioning awal yt-dlp belum berhasil: {}", e);
+                    };
+                    let js_fut = async {
+                        if let Err(e) = ensure_js_runtime_bin().await {
+                            log::warn!("Auto-provisioning awal runtime JS belum berhasil: {}", e);
                         }
-                    }
-                };
-                let js_fut = async {
-                    if let Err(e) = ensure_js_runtime_bin().await {
-                        log::warn!("Auto-provisioning awal runtime JS belum berhasil: {}", e);
-                    }
-                };
-                let ffmpeg_fut = async {
-                    if get_ffmpeg_bin().is_none() {
-                        if let Err(e) = ensure_ffmpeg_bin().await {
-                            log::warn!("Auto-provisioning awal FFmpeg belum berhasil: {}", e);
+                    };
+                    let ffmpeg_fut = async {
+                        if get_ffmpeg_bin().is_none() {
+                            if let Err(e) = ensure_ffmpeg_bin().await {
+                                log::warn!("Auto-provisioning awal FFmpeg belum berhasil: {}", e);
+                            }
                         }
-                    }
-                };
-                tokio::join!(ytdlp_fut, js_fut, ffmpeg_fut);
-            });
-            tauri::async_runtime::spawn(async move {
-                start_browser_bridge_server(handle).await;
-            });
+                    };
+                    tokio::join!(ytdlp_fut, js_fut, ffmpeg_fut);
+                });
+                tauri::async_runtime::spawn(async move {
+                    start_browser_bridge_server(handle).await;
+                });
+            }
 
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            #[cfg(desktop)]
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if should_hide_on_close(window.label()) {
                     api.prevent_close();
@@ -9184,7 +9784,7 @@ pub fn run() {
                     show_main_window(app_handle);
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(all(desktop, not(target_os = "macos")))]
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if code.is_none() {
                     api.prevent_exit();
@@ -9380,7 +9980,7 @@ mod tests {
         let target = test_dir.join("sample.bin");
         std::fs::write(&target, b"abc").expect("write sample");
 
-        let sums = verify_file_checksum(target.display().to_string())
+        let sums = verify_file_checksum_local(target.display().to_string())
             .await
             .expect("verify checksum");
         assert_eq!(sums.size_bytes, 3);

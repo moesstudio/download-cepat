@@ -62,5 +62,107 @@ jobs:
             - **macOS**: `Download.Cepat___VERSION___aarch64.dmg` & `.app.tar.gz` (In-App Auto-Update)
             - **Windows**: `Download.Cepat___VERSION___x64-setup.exe` (NSIS Installer) & `.msi`
             - **Linux**: `Download.Cepat___VERSION___amd64.AppImage`, `.deb` & `.rpm`
+            - **Android (8.0+)**: `Download.Cepat___VERSION___arm64-v8a.apk` & `Download.Cepat___VERSION___universal.apk` (In-App APK Auto-Update)
           releaseDraft: false
           prerelease: false
+
+  build-android:
+    needs: [build-and-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Rust Android Targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 35/36, Build-Tools & NDK r27c
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" "ndk;27.2.12479018"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Configure Android Release Keystore (if secret present)
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 --decode > /tmp/download-cepat-release.jks
+          echo "ANDROID_KEYSTORE_PATH=/tmp/download-cepat-release.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+
+      - name: Build Android APKs (arm64-v8a & universal)
+        run: |
+          APP_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          mkdir -p dist-android
+
+          rm -rf src-tauri/gen/android/app/build/outputs/apk
+          npx tauri android build --apk --target aarch64 --ci
+          ARM64_APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' ! -name '*-unsigned.apk' | head -n 1 || true)"
+          if [[ -z "$ARM64_APK" ]]; then
+            ARM64_APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          fi
+          cp -f "$ARM64_APK" "dist-android/Download.Cepat_${APP_VERSION}_arm64-v8a.apk"
+
+          rm -rf src-tauri/gen/android/app/build/outputs/apk
+          npx tauri android build --apk --target aarch64 armv7 --ci
+          UNIV_APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' ! -name '*-unsigned.apk' | head -n 1 || true)"
+          if [[ -z "$UNIV_APK" ]]; then
+            UNIV_APK="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
+          fi
+          cp -f "$UNIV_APK" "dist-android/Download.Cepat_${APP_VERSION}_universal.apk"
+
+          if [[ -n "${ANDROID_KEYSTORE_PATH:-}" ]]; then
+            "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose "dist-android/Download.Cepat_${APP_VERSION}_arm64-v8a.apk"
+            "${ANDROID_HOME}/build-tools/35.0.0/apksigner" verify --verbose "dist-android/Download.Cepat_${APP_VERSION}_universal.apk"
+          fi
+          ls -lh dist-android/
+
+      - name: Upload Android APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apks
+          path: dist-android/*.apk
+
+      - name: Attach Android APKs to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APP_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            RELEASE_TAG="v${APP_VERSION}"
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist-android/*.apk --clobber
+          else
+            echo "Release tag $RELEASE_TAG not found; skipping release upload."
+          fi

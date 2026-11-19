@@ -1414,6 +1414,83 @@ fn test_updater_semver_and_platform_selection() {
         },
     );
     assert!(!same_ver.update_available);
+
+    // Android APK selection (arm64-v8a exact match, universal fallback, and arm 32-bit safety)
+    let mut android_release = release.clone();
+    android_release.tag_name = "v1.0.6".to_string();
+    android_release.assets.push(GitHubReleaseAsset {
+        name: "Download.Cepat_1.0.6_arm64-v8a.apk".to_string(),
+        browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.6/Download.Cepat_1.0.6_arm64-v8a.apk".to_string(),
+        size: 18_000_000,
+        digest: Some("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()),
+    });
+    android_release.assets.push(GitHubReleaseAsset {
+        name: "Download.Cepat_1.0.6_universal.apk".to_string(),
+        browser_download_url: "https://github.com/moesstudio/download-cepat/releases/download/v1.0.6/Download.Cepat_1.0.6_universal.apk".to_string(),
+        size: 28_000_000,
+        digest: Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string()),
+    });
+
+    let android_arm64 = evaluate_release(
+        "1.0.5",
+        &android_release,
+        &PlatformEnvironment {
+            os: "android".to_string(),
+            arch: "aarch64".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert!(android_arm64.update_available);
+    assert_eq!(android_arm64.install_kind, "android_apk");
+    assert!(android_arm64.in_place_supported);
+    assert_eq!(
+        android_arm64.asset_name.as_deref(),
+        Some("Download.Cepat_1.0.6_arm64-v8a.apk")
+    );
+
+    let android_arm32 = evaluate_release(
+        "1.0.5",
+        &android_release,
+        &PlatformEnvironment {
+            os: "android".to_string(),
+            arch: "arm".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert_eq!(android_arm32.install_kind, "android_apk");
+    assert!(android_arm32.in_place_supported);
+    assert_eq!(
+        android_arm32.asset_name.as_deref(),
+        Some("Download.Cepat_1.0.6_universal.apk")
+    );
+
+    let mut universal_only = android_release.clone();
+    universal_only
+        .assets
+        .retain(|a| !a.name.contains("arm64-v8a"));
+    let android_fallback = evaluate_release(
+        "1.0.5",
+        &universal_only,
+        &PlatformEnvironment {
+            os: "android".to_string(),
+            arch: "aarch64".to_string(),
+            is_appimage: false,
+            has_dpkg: false,
+            has_rpm: false,
+            inside_macos_bundle: false,
+        },
+    );
+    assert_eq!(android_fallback.install_kind, "android_apk");
+    assert_eq!(
+        android_fallback.asset_name.as_deref(),
+        Some("Download.Cepat_1.0.6_universal.apk")
+    );
 }
 
 #[tokio::test]
